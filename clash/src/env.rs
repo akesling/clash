@@ -33,7 +33,49 @@ pub trait PolicyStore {
 
 /// Per-session bookkeeping: audit init, active-session marker, trace init,
 /// incremental stats/trace updates, and pending-ask recording.
-pub trait SessionRecorder {}
+pub trait SessionRecorder {
+    /// Initialize the per-session audit directory. Returns the dir path on
+    /// success; failures are non-fatal at the call site.
+    fn init_audit_session(
+        &self,
+        input: &crate::hooks::SessionStartHookInput,
+    ) -> std::io::Result<std::path::PathBuf>;
+
+    /// Record this session as the active one. Failures are non-fatal.
+    fn set_active_session(&self, session_id: &str) -> anyhow::Result<()>;
+
+    /// Initialize toolpath tracing for this session. Failures are non-fatal.
+    fn init_trace(&self, input: &crate::hooks::SessionStartHookInput) -> anyhow::Result<()>;
+
+    /// Increment per-effect counters and persist updated session stats.
+    /// Called once per tool use from the `PreToolUse` path.
+    fn update_session_stats(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        effect: crate::policy::Effect,
+        cwd: &str,
+    );
+
+    /// Append a policy decision to the session trace.
+    fn sync_trace(
+        &self,
+        session_id: &str,
+        decision: Option<crate::trace::PolicyDecision>,
+    ) -> anyhow::Result<()>;
+
+    /// Record that we returned `ask` for a tool use, so `PostToolUse` can
+    /// detect approval and suggest a session rule.
+    fn record_pending_ask(
+        &self,
+        session_id: &str,
+        tool_use_id: &str,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        cwd: &str,
+    );
+}
 
 /// Probe the host for sandbox support.
 pub trait SandboxProbe {
@@ -83,7 +125,65 @@ impl PolicyStore for DefaultPolicyStore {
 
 /// Production [`SessionRecorder`]. Zero-sized; lives as a `static`.
 pub struct DefaultSessionRecorder;
-impl SessionRecorder for DefaultSessionRecorder {}
+impl SessionRecorder for DefaultSessionRecorder {
+    fn init_audit_session(
+        &self,
+        input: &crate::hooks::SessionStartHookInput,
+    ) -> std::io::Result<std::path::PathBuf> {
+        crate::audit::init_session(
+            &input.session_id,
+            &input.cwd,
+            input.source.as_deref(),
+            input.model.as_deref(),
+        )
+    }
+
+    fn set_active_session(&self, session_id: &str) -> anyhow::Result<()> {
+        crate::settings::ClashSettings::set_active_session(session_id)
+    }
+
+    fn init_trace(&self, input: &crate::hooks::SessionStartHookInput) -> anyhow::Result<()> {
+        crate::trace::init_trace(
+            &input.session_id,
+            &input.transcript_path,
+            &input.cwd,
+            input.model.as_deref(),
+            input.source.as_deref(),
+        )
+    }
+
+    fn update_session_stats(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        effect: crate::policy::Effect,
+        cwd: &str,
+    ) {
+        crate::audit::update_session_stats(session_id, tool_name, tool_input, effect, cwd);
+    }
+
+    fn sync_trace(
+        &self,
+        session_id: &str,
+        decision: Option<crate::trace::PolicyDecision>,
+    ) -> anyhow::Result<()> {
+        crate::trace::sync_trace(session_id, decision)
+    }
+
+    fn record_pending_ask(
+        &self,
+        session_id: &str,
+        tool_use_id: &str,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        cwd: &str,
+    ) {
+        crate::session_policy::record_pending_ask(
+            session_id, tool_use_id, tool_name, tool_input, cwd,
+        );
+    }
+}
 
 /// Production [`SandboxProbe`]. Zero-sized; lives as a `static`.
 pub struct DefaultSandboxProbe;
