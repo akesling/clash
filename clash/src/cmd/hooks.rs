@@ -69,26 +69,20 @@ impl HookCmd {
                         tool = %input.tool_name,
                         "CLASH_PASSTHROUGH: deferring to native permissions"
                     );
-                    if let Err(e) = trace::sync_trace(&input.session_id, None) {
+                    let env = crate::env::Env::prod();
+                    if let Err(e) = env.session.sync_trace(&input.session_id, None) {
                         tracing::warn!(error = %e, "Failed to sync trace (PreToolUse/passthrough)");
                     }
                     HookOutput::continue_execution()
                 } else {
+                    let env = crate::env::Env::prod();
                     let mut hook_ctx = HookContext::from_transcript_path(&input.transcript_path);
                     if let Some(agent) = input.agent {
                         hook_ctx = hook_ctx.with_agent(agent);
                     }
-                    let settings = ClashSettings::load_or_create_with_session(
-                        Some(&input.session_id),
-                        Some(&hook_ctx),
-                    )?;
+                    let settings = env.policy.load_settings(&input.session_id, &hook_ctx)?;
                     let output = check_permission(&input, &settings)?;
 
-                    // Interactive tools (e.g., AskUserQuestion) require user input
-                    // via Claude Code's native UI. When the policy says "ask", pass
-                    // through to CC's native prompt. When the policy explicitly allows
-                    // or denies, enforce it — this enables mode-aware automation
-                    // (e.g., allow ExitPlanMode in plan mode).
                     if is_interactive_tool(&input.tool_name)
                         && !is_deny_decision(&output)
                         && is_ask_decision(&output)
@@ -96,10 +90,8 @@ impl HookCmd {
                         info!(tool = %input.tool_name, "Passthrough: interactive tool deferred to Claude Code");
                         HookOutput::continue_execution()
                     } else {
-                        // Update session stats for the status line (only here, not in
-                        // log_decision, to avoid double-counting PermissionRequest).
                         if let Some(effect) = hook_effect_to_policy(output.effect()) {
-                            crate::audit::update_session_stats(
+                            env.session.update_session_stats(
                                 &input.session_id,
                                 &input.tool_name,
                                 &input.tool_input,
@@ -108,12 +100,10 @@ impl HookCmd {
                             );
                         }
 
-                        // If the decision is Ask, record it so PostToolUse can detect
-                        // user approval and suggest a session policy rule.
                         if is_ask_decision(&output)
                             && let Some(ref tool_use_id) = input.tool_use_id
                         {
-                            session_policy::record_pending_ask(
+                            env.session.record_pending_ask(
                                 &input.session_id,
                                 tool_use_id,
                                 &input.tool_name,
@@ -122,7 +112,6 @@ impl HookCmd {
                             );
                         }
 
-                        // Sync trace with the policy decision for this tool use.
                         let decision = input.tool_use_id.as_ref().and_then(|id| {
                             let effect = hook_effect_to_policy(output.effect())?;
                             Some(trace::PolicyDecision {
@@ -132,7 +121,7 @@ impl HookCmd {
                                 reason: None,
                             })
                         });
-                        if let Err(e) = trace::sync_trace(&input.session_id, decision) {
+                        if let Err(e) = env.session.sync_trace(&input.session_id, decision) {
                             tracing::warn!(error = %e, "Failed to sync trace (PreToolUse)");
                         }
 
