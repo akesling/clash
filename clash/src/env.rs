@@ -16,7 +16,9 @@ pub trait PolicyStore {}
 pub trait SessionRecorder {}
 
 /// Probe the host for sandbox support.
-pub trait SandboxProbe {}
+pub trait SandboxProbe {
+    fn check_support(&self) -> crate::sandbox::SupportLevel;
+}
 
 /// Bundle of env capabilities passed through hook handlers.
 ///
@@ -38,7 +40,11 @@ impl SessionRecorder for DefaultSessionRecorder {}
 
 /// Production [`SandboxProbe`]. Zero-sized; lives as a `static`.
 pub struct DefaultSandboxProbe;
-impl SandboxProbe for DefaultSandboxProbe {}
+impl SandboxProbe for DefaultSandboxProbe {
+    fn check_support(&self) -> crate::sandbox::SupportLevel {
+        crate::sandbox::check_support()
+    }
+}
 
 pub static DEFAULT_POLICY_STORE: DefaultPolicyStore = DefaultPolicyStore;
 pub static DEFAULT_SESSION_RECORDER: DefaultSessionRecorder = DefaultSessionRecorder;
@@ -63,5 +69,25 @@ mod tests {
     #[test]
     fn env_prod_constructs() {
         let _env = Env::prod();
+    }
+
+    #[test]
+    fn default_sandbox_probe_matches_check_support() {
+        let direct = crate::sandbox::check_support();
+        let via_env = DEFAULT_SANDBOX_PROBE.check_support();
+        let same_variant = matches!(
+            (&direct, &via_env),
+            (
+                crate::sandbox::SupportLevel::Full,
+                crate::sandbox::SupportLevel::Full
+            ) | (
+                crate::sandbox::SupportLevel::Partial { .. },
+                crate::sandbox::SupportLevel::Partial { .. }
+            ) | (
+                crate::sandbox::SupportLevel::Unsupported { .. },
+                crate::sandbox::SupportLevel::Unsupported { .. }
+            )
+        );
+        assert!(same_variant, "trait delegate diverged from direct call");
     }
 }
