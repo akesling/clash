@@ -133,12 +133,10 @@ impl HookCmd {
                 let input = self
                     .parse_tool_use_input()
                     .context("parsing PostToolUse hook input from stdin")?;
+                let env = crate::env::Env::prod();
 
-                // Check if this tool use was previously "ask"ed and the user
-                // accepted. If so, return advisory context suggesting a session
-                // rule for Claude to offer the user.
                 let session_context = input.tool_use_id.as_deref().and_then(|tool_use_id| {
-                    let advice = session_policy::process_post_tool_use(
+                    let advice = env.session.consume_pending_ask(
                         tool_use_id,
                         &input.session_id,
                         &input.tool_name,
@@ -152,18 +150,12 @@ impl HookCmd {
                     Some(advice.as_context())
                 });
 
-                // Check if a sandboxed Bash command failed with network or
-                // filesystem errors, and provide hints about sandbox restrictions.
                 let (network_context, fs_context) = {
                     let mut hook_ctx = HookContext::from_transcript_path(&input.transcript_path);
                     if let Some(agent) = input.agent {
                         hook_ctx = hook_ctx.with_agent(agent);
                     }
-                    let settings = ClashSettings::load_or_create_with_session(
-                        Some(&input.session_id),
-                        Some(&hook_ctx),
-                    )
-                    .ok();
+                    let settings = env.policy.load_settings(&input.session_id, &hook_ctx).ok();
                     let net = settings.as_ref().and_then(|s| {
                         crate::network_hints::check_for_sandbox_network_hint(&input, s)
                     });
@@ -173,7 +165,6 @@ impl HookCmd {
                     (net, fs)
                 };
 
-                // Combine contexts (session policy advice + sandbox hints).
                 let context = [session_context, network_context, fs_context]
                     .into_iter()
                     .flatten()
@@ -184,8 +175,7 @@ impl HookCmd {
                     Some(context.join("\n\n"))
                 };
 
-                // Sync trace to pick up tool responses.
-                if let Err(e) = trace::sync_trace(&input.session_id, None) {
+                if let Err(e) = env.session.sync_trace(&input.session_id, None) {
                     tracing::warn!(error = %e, "Failed to sync trace (PostToolUse)");
                 }
 

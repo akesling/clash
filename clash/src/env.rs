@@ -75,6 +75,17 @@ pub trait SessionRecorder {
         tool_input: &serde_json::Value,
         cwd: &str,
     );
+
+    /// Look up and clear a pending ask record; returns suggested rule advice
+    /// if the tool use matches a prior `ask` decision the user accepted.
+    fn consume_pending_ask(
+        &self,
+        tool_use_id: &str,
+        session_id: &str,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        cwd: &str,
+    ) -> Option<crate::session_policy::ApprovalAdvice>;
 }
 
 /// Probe the host for sandbox support.
@@ -182,6 +193,23 @@ impl SessionRecorder for DefaultSessionRecorder {
         crate::session_policy::record_pending_ask(
             session_id, tool_use_id, tool_name, tool_input, cwd,
         );
+    }
+
+    fn consume_pending_ask(
+        &self,
+        tool_use_id: &str,
+        session_id: &str,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        cwd: &str,
+    ) -> Option<crate::session_policy::ApprovalAdvice> {
+        crate::session_policy::process_post_tool_use(
+            tool_use_id,
+            session_id,
+            tool_name,
+            tool_input,
+            cwd,
+        )
     }
 }
 
@@ -379,6 +407,17 @@ impl SessionRecorder for InMemorySessionRecorder {
         _tool_input: &serde_json::Value,
         _cwd: &str,
     ) {
+    }
+
+    fn consume_pending_ask(
+        &self,
+        _tool_use_id: &str,
+        _session_id: &str,
+        _tool_name: &str,
+        _tool_input: &serde_json::Value,
+        _cwd: &str,
+    ) -> Option<crate::session_policy::ApprovalAdvice> {
+        None
     }
 }
 
