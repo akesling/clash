@@ -209,6 +209,212 @@ impl Env<'static> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Test fakes
+// ---------------------------------------------------------------------------
+
+/// Hermetic in-memory [`Env`] for unit tests. Writes land in a [`TempDir`]
+/// so they vanish at end of test; sandbox probe returns canned `Full`;
+/// policy operations return success without touching disk.
+#[cfg(test)]
+pub struct TestEnv {
+    policy: StubPolicyStore,
+    session: InMemorySessionRecorder,
+    sandbox: StubSandboxProbe,
+}
+
+#[cfg(test)]
+impl TestEnv {
+    pub fn new() -> Self {
+        Self {
+            policy: StubPolicyStore::default(),
+            session: InMemorySessionRecorder::new(),
+            sandbox: StubSandboxProbe::full(),
+        }
+    }
+
+    pub fn builder() -> TestEnvBuilder {
+        TestEnvBuilder::default()
+    }
+
+    pub fn env(&self) -> Env<'_> {
+        Env {
+            policy: &self.policy,
+            session: &self.session,
+            sandbox: &self.sandbox,
+        }
+    }
+
+    pub fn root(&self) -> &std::path::Path {
+        self.session.root()
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub struct TestEnvBuilder {
+    welcome_path: Option<std::path::PathBuf>,
+    sandbox_support: Option<crate::sandbox::SupportLevel>,
+}
+
+#[cfg(test)]
+impl TestEnvBuilder {
+    pub fn with_welcome(mut self, path: std::path::PathBuf) -> Self {
+        self.welcome_path = Some(path);
+        self
+    }
+
+    pub fn with_sandbox(mut self, support: crate::sandbox::SupportLevel) -> Self {
+        self.sandbox_support = Some(support);
+        self
+    }
+
+    pub fn build(self) -> TestEnv {
+        TestEnv {
+            policy: StubPolicyStore {
+                welcome_path: self.welcome_path,
+            },
+            session: InMemorySessionRecorder::new(),
+            sandbox: match self.sandbox_support {
+                Some(s) => StubSandboxProbe { support: s },
+                None => StubSandboxProbe::full(),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub struct StubPolicyStore {
+    welcome_path: Option<std::path::PathBuf>,
+}
+
+#[cfg(test)]
+impl PolicyStore for StubPolicyStore {
+    fn ensure_user_policy(&self) -> anyhow::Result<Option<std::path::PathBuf>> {
+        Ok(self.welcome_path.clone())
+    }
+
+    fn validate_session(
+        &self,
+        _session_id: &str,
+        _hook_ctx: &crate::settings::HookContext,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn load_settings(
+        &self,
+        _session_id: &str,
+        _hook_ctx: &crate::settings::HookContext,
+    ) -> anyhow::Result<crate::settings::ClashSettings> {
+        Ok(crate::settings::ClashSettings::default())
+    }
+}
+
+#[cfg(test)]
+pub struct InMemorySessionRecorder {
+    tempdir: tempfile::TempDir,
+}
+
+#[cfg(test)]
+impl InMemorySessionRecorder {
+    fn new() -> Self {
+        Self {
+            tempdir: tempfile::tempdir().expect("create tempdir for InMemorySessionRecorder"),
+        }
+    }
+
+    fn root(&self) -> &std::path::Path {
+        self.tempdir.path()
+    }
+}
+
+#[cfg(test)]
+impl SessionRecorder for InMemorySessionRecorder {
+    fn init_audit_session(
+        &self,
+        input: &crate::hooks::SessionStartHookInput,
+    ) -> std::io::Result<std::path::PathBuf> {
+        let dir = self
+            .tempdir
+            .path()
+            .join("sessions")
+            .join(&input.session_id);
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    fn set_active_session(&self, _session_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn init_trace(&self, _input: &crate::hooks::SessionStartHookInput) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn update_session_stats(
+        &self,
+        _session_id: &str,
+        _tool_name: &str,
+        _tool_input: &serde_json::Value,
+        _effect: crate::policy::Effect,
+        _cwd: &str,
+    ) {
+    }
+
+    fn sync_trace(
+        &self,
+        _session_id: &str,
+        _decision: Option<crate::trace::PolicyDecision>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn record_pending_ask(
+        &self,
+        _session_id: &str,
+        _tool_use_id: &str,
+        _tool_name: &str,
+        _tool_input: &serde_json::Value,
+        _cwd: &str,
+    ) {
+    }
+}
+
+#[cfg(test)]
+pub struct StubSandboxProbe {
+    support: crate::sandbox::SupportLevel,
+}
+
+#[cfg(test)]
+impl StubSandboxProbe {
+    pub fn full() -> Self {
+        Self {
+            support: crate::sandbox::SupportLevel::Full,
+        }
+    }
+}
+
+#[cfg(test)]
+impl SandboxProbe for StubSandboxProbe {
+    fn check_support(&self) -> crate::sandbox::SupportLevel {
+        match &self.support {
+            crate::sandbox::SupportLevel::Full => crate::sandbox::SupportLevel::Full,
+            crate::sandbox::SupportLevel::Partial { missing } => {
+                crate::sandbox::SupportLevel::Partial {
+                    missing: missing.clone(),
+                }
+            }
+            crate::sandbox::SupportLevel::Unsupported { reason } => {
+                crate::sandbox::SupportLevel::Unsupported {
+                    reason: reason.clone(),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +442,37 @@ mod tests {
             )
         );
         assert!(same_variant, "trait delegate diverged from direct call");
+    }
+
+    #[test]
+    fn test_env_is_hermetic() {
+        let test_env = TestEnv::new();
+        let env = test_env.env();
+
+        assert!(env.policy.ensure_user_policy().unwrap().is_none());
+        let hook_ctx = crate::settings::HookContext::from_transcript_path("/tmp/t.jsonl");
+        env.policy.validate_session("test-session", &hook_ctx).unwrap();
+
+        assert!(matches!(
+            env.sandbox.check_support(),
+            crate::sandbox::SupportLevel::Full
+        ));
+
+        let input = crate::hooks::SessionStartHookInput {
+            session_id: "test-session".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/tmp".into(),
+            permission_mode: None,
+            hook_event_name: "SessionStart".into(),
+            source: None,
+            model: None,
+        };
+        let audit_dir = env.session.init_audit_session(&input).unwrap();
+        assert!(
+            audit_dir.starts_with(test_env.root()),
+            "audit dir {} escaped TestEnv root {}",
+            audit_dir.display(),
+            test_env.root().display(),
+        );
     }
 }
