@@ -232,7 +232,8 @@ impl HookCmd {
                     input.session_id = fallback_session_id(self.agent);
                     info!(session_id = %input.session_id, "Agent did not provide session_id, using fallback");
                 }
-                crate::handlers::handle_session_start(&input, Some(self.agent))?
+                let env = crate::env::Env::prod();
+                crate::handlers::handle_session_start(&env, &input, Some(self.agent))?
             }
             HookSubcommand::Stop => {
                 let mut input = self
