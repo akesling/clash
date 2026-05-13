@@ -9,7 +9,27 @@
 #![allow(clippy::disallowed_methods)] // adapter module: the only place that may call the wrapped functions
 
 /// Read/write user-, project-, and session-level policy state.
-pub trait PolicyStore {}
+pub trait PolicyStore {
+    /// Ensure a user-level policy file exists. Returns `Some(path)` if a
+    /// fresh file was created, `None` if one already existed.
+    fn ensure_user_policy(&self) -> anyhow::Result<Option<std::path::PathBuf>>;
+
+    /// Load and compile settings for the session. Errors propagate (the
+    /// session cannot proceed without a working policy state).
+    fn validate_session(
+        &self,
+        session_id: &str,
+        hook_ctx: &crate::settings::HookContext,
+    ) -> anyhow::Result<()>;
+
+    /// Load full settings for the session — used by the `PreToolUse` path,
+    /// which needs the compiled `ClashSettings` for `check_permission`.
+    fn load_settings(
+        &self,
+        session_id: &str,
+        hook_ctx: &crate::settings::HookContext,
+    ) -> anyhow::Result<crate::settings::ClashSettings>;
+}
 
 /// Per-session bookkeeping: audit init, active-session marker, trace init,
 /// incremental stats/trace updates, and pending-ask recording.
@@ -32,7 +52,34 @@ pub struct Env<'a> {
 
 /// Production [`PolicyStore`]. Zero-sized; lives as a `static`.
 pub struct DefaultPolicyStore;
-impl PolicyStore for DefaultPolicyStore {}
+impl PolicyStore for DefaultPolicyStore {
+    fn ensure_user_policy(&self) -> anyhow::Result<Option<std::path::PathBuf>> {
+        crate::settings::ClashSettings::ensure_user_policy_exists()
+    }
+
+    fn validate_session(
+        &self,
+        session_id: &str,
+        hook_ctx: &crate::settings::HookContext,
+    ) -> anyhow::Result<()> {
+        crate::settings::ClashSettings::load_or_create_with_session(
+            Some(session_id),
+            Some(hook_ctx),
+        )?;
+        Ok(())
+    }
+
+    fn load_settings(
+        &self,
+        session_id: &str,
+        hook_ctx: &crate::settings::HookContext,
+    ) -> anyhow::Result<crate::settings::ClashSettings> {
+        crate::settings::ClashSettings::load_or_create_with_session(
+            Some(session_id),
+            Some(hook_ctx),
+        )
+    }
+}
 
 /// Production [`SessionRecorder`]. Zero-sized; lives as a `static`.
 pub struct DefaultSessionRecorder;
