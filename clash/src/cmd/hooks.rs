@@ -224,7 +224,8 @@ impl HookCmd {
                 }
 
                 // Final catch-up sync for non-tool conversation turns.
-                if let Err(e) = trace::sync_trace(&input.session_id, None) {
+                let env = crate::env::Env::prod();
+                if let Err(e) = env.session.sync_trace(&input.session_id, None) {
                     tracing::warn!(error = %e, "Failed to sync trace (Stop)");
                 }
 
