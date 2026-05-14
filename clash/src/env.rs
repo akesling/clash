@@ -1,10 +1,21 @@
 //! Capability-based env injection for hook handlers.
 //!
-//! The three production hook entry points need to be unit-testable without
-//! reaching into the real `$HOME`, real filesystem, or real sandbox probe.
-//! Each env-dependent capability is expressed as a small trait. Production
-//! wires the real functions via [`Env::prod`]; tests construct an [`Env`]
-//! from stub or in-memory implementations.
+//! The production hook entry points (`handle_session_start` plus the
+//! `PreToolUse` / `PostToolUse` / `Stop` arms in `cmd/hooks.rs`) need to be
+//! unit-testable without reaching into the real `$HOME`, real filesystem,
+//! or real sandbox probe. Each env-dependent capability is expressed as a
+//! small trait. Production wires the real functions via [`Env::prod`];
+//! tests construct an [`Env`] from stub or in-memory implementations.
+//!
+//! **Lint guardrail.** `clippy.toml` at the repo root disallows direct calls
+//! to every function wrapped by this module. This file is the only place
+//! that may invoke them (the top-level `#![allow(clippy::disallowed_methods)]`
+//! permits it). When you add a new env-dependent capability, add the method
+//! to the appropriate trait here, add the underlying function to
+//! `clippy.toml`'s `disallowed-methods`, and migrate existing handler
+//! callers through the trait. CLI commands that legitimately bypass `Env`
+//! (e.g. `clash doctor`) annotate their callsite with a per-site
+//! `#[allow(clippy::disallowed_methods)]` and a rationale comment.
 
 #![allow(clippy::disallowed_methods)] // adapter module: the only place that may call the wrapped functions
 
