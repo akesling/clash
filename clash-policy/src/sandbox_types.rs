@@ -346,7 +346,7 @@ impl<'de> Deserialize<'de> for NetworkPolicy {
 /// not exist on the current system).
 pub fn resolve_symlinks(path: &str) -> String {
     use std::collections::VecDeque;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::path::{Component, Path, PathBuf};
 
     let path = Path::new(path);
@@ -354,21 +354,44 @@ pub fn resolve_symlinks(path: &str) -> String {
         return path.to_string_lossy().into_owned();
     }
 
+    // Flatten a path into a work queue of segments, preserving `..` and `.`.
+    // These traversal segments MUST be kept: a relative symlink target such as
+    // Homebrew's `bin/flatc -> ../Cellar/.../flatc` depends on the `..` to climb
+    // out of the link's directory. Dropping it resolves to a bogus path (e.g.
+    // `.../bin/Cellar/.../flatc`) that never matches the real binary, so the
+    // Seatbelt profile denies executing it. Root/prefix segments are dropped
+    // because `resolved` is seeded at "/".
+    fn segments(p: &Path) -> Vec<OsString> {
+        p.components()
+            .filter_map(|c| match c {
+                Component::Normal(s) => Some(s.to_owned()),
+                Component::ParentDir => Some(OsString::from("..")),
+                Component::CurDir => Some(OsString::from(".")),
+                Component::RootDir | Component::Prefix(_) => None,
+            })
+            .collect()
+    }
+
     // Collect path components into a work queue so that symlink targets
     // can be spliced in for further resolution.
-    let mut pending: VecDeque<OsString> = path
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(s) => Some(s.to_owned()),
-            _ => None,
-        })
-        .collect();
+    let mut pending: VecDeque<OsString> = segments(path).into();
 
     let mut resolved = PathBuf::from("/");
     let mut symlink_depth: usize = 0;
     const MAX_SYMLINK_DEPTH: usize = 40;
 
     while let Some(component) = pending.pop_front() {
+        // Resolve traversal segments against the already-resolved prefix.
+        // Because every prefix component was resolved before we descended into
+        // it, popping on `..` yields the real parent directory.
+        if component.as_os_str() == OsStr::new("..") {
+            resolved.pop();
+            continue;
+        }
+        if component.as_os_str() == OsStr::new(".") {
+            continue;
+        }
+
         resolved.push(&component);
 
         if let Ok(target) = std::fs::read_link(&resolved) {
@@ -378,22 +401,16 @@ pub fn resolve_symlinks(path: &str) -> String {
             }
 
             // Splice the target's components into the front of the queue
-            // so they get resolved on subsequent iterations.
+            // so they get resolved on subsequent iterations. An absolute
+            // target restarts from root; a relative target resolves against
+            // the symlink's parent directory.
             if target.is_absolute() {
                 resolved = PathBuf::from("/");
             } else {
                 resolved.pop();
             }
 
-            let target_components: Vec<OsString> = target
-                .components()
-                .filter_map(|c| match c {
-                    Component::Normal(s) => Some(s.to_owned()),
-                    _ => None,
-                })
-                .collect();
-
-            for (i, tc) in target_components.into_iter().enumerate() {
+            for (i, tc) in segments(&target).into_iter().enumerate() {
                 pending.insert(i, tc);
             }
         }
@@ -617,6 +634,47 @@ impl ViolationAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_symlinks_follows_relative_parent_dir_target() {
+        // Regression: a relative symlink target with `..` (as Homebrew uses,
+        // `bin/tool -> ../Cellar/pkg/1.0/bin/tool`) must climb out of the
+        // link's directory. Previously the `..` was dropped, resolving to the
+        // bogus `.../bin/Cellar/...` and denying exec of the real binary.
+        use std::os::unix::fs::symlink;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let uniq = format!(
+            "clash_symlink_test_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let root = std::env::temp_dir().join(uniq);
+
+        let real_bin = root.join("Cellar/pkg/1.0/bin");
+        std::fs::create_dir_all(&real_bin).unwrap();
+        let real_tool = real_bin.join("tool");
+        std::fs::write(&real_tool, b"#!/bin/sh\n").unwrap();
+
+        let link_bin = root.join("bin");
+        std::fs::create_dir_all(&link_bin).unwrap();
+        let link = link_bin.join("tool");
+        symlink("../Cellar/pkg/1.0/bin/tool", &link).unwrap();
+
+        let got = resolve_symlinks(link.to_str().unwrap());
+        // Compare against the real path resolved the same way, so any symlinks
+        // in the temp-dir prefix (e.g. /tmp -> /private/tmp) cancel out.
+        let expect = resolve_symlinks(real_tool.to_str().unwrap());
+        assert_eq!(got, expect, "symlink must resolve to the real Cellar path");
+        assert!(
+            !got.contains("/bin/Cellar/"),
+            "must not append the target under bin/: {got}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn test_cap_short() {
