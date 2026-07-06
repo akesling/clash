@@ -676,6 +676,145 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // ── Adversarial symlink-resolution security tests ─────────────────────
+    //
+    // Security invariant: `resolve_symlinks` must equal the KERNEL's canonical
+    // resolution. Seatbelt matches real syscall paths against the profile's
+    // subpaths (it does its own symlink resolution at runtime), so as long as
+    // clash grants exactly the kernel-canonical target, it can never grant a
+    // path broader than where the symlink actually points. These tests craft
+    // hostile symlinks and assert clash == `std::fs::canonicalize`.
+
+    #[cfg(unix)]
+    fn sym_tmp_root() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static C: AtomicUsize = AtomicUsize::new(0);
+        // Canonicalize the temp base so the constructed portion is firmlink-free
+        // (macOS $TMPDIR sits under the /var firmlink); then clash — which skips
+        // firmlinks by design — and canonicalize agree on the whole path.
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let d = base.join(format!(
+            "clash_symsec_{}_{}",
+            std::process::id(),
+            C.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[cfg(unix)]
+    fn assert_eq_kernel(link: &std::path::Path) {
+        let got = resolve_symlinks(link.to_str().unwrap());
+        let kernel = std::fs::canonicalize(link).unwrap();
+        assert_eq!(
+            std::path::Path::new(&got),
+            kernel.as_path(),
+            "resolve_symlinks must equal kernel canonicalize for {link:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_dot_segments_match_kernel() {
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/f"), b"x").unwrap();
+        symlink("./sub/./f", root.join("link")).unwrap();
+        assert_eq_kernel(&root.join("link"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_chained_parentdir_links_match_kernel() {
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        std::fs::create_dir_all(root.join("x")).unwrap();
+        std::fs::create_dir_all(root.join("y")).unwrap();
+        std::fs::create_dir_all(root.join("z")).unwrap();
+        std::fs::write(root.join("y/file"), b"x").unwrap();
+        // z/l1 -> ../x/l2 -> ../y/file : every hop climbs via `..`.
+        symlink("../y/file", root.join("x/l2")).unwrap();
+        symlink("../x/l2", root.join("z/l1")).unwrap();
+        assert_eq_kernel(&root.join("z/l1"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_absolute_target_matches_kernel() {
+        // Absolute targets were already followed before the fix; confirm the
+        // fix keeps them equal to the kernel (no behavior change for this case).
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        std::fs::write(root.join("real"), b"x").unwrap();
+        symlink(root.join("real"), root.join("abs")).unwrap();
+        assert_eq_kernel(&root.join("abs"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_hostile_parentdir_climb_matches_kernel_no_overshoot() {
+        // A rule-path symlink crafted to climb out with `..` must resolve to
+        // EXACTLY where it points (kernel truth), never to a broader ancestor
+        // than the target itself.
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        std::fs::create_dir_all(root.join("a/b/c/d")).unwrap();
+        std::fs::write(root.join("a/b/marker"), b"x").unwrap();
+        // from a/b/c/d, `../../marker` == a/b/marker
+        symlink("../../marker", root.join("a/b/c/d/link")).unwrap();
+        let got = resolve_symlinks(root.join("a/b/c/d/link").to_str().unwrap());
+        assert_eq!(
+            std::path::Path::new(&got),
+            std::fs::canonicalize(root.join("a/b/c/d/link"))
+                .unwrap()
+                .as_path()
+        );
+        assert!(got.ends_with("/a/b/marker"), "resolved to {got}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_parentdir_cannot_climb_above_root() {
+        // Absurdly many `..` must clamp at "/" (as the kernel does), never
+        // producing an above-root or garbage grant.
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        std::fs::create_dir_all(root.join("d")).unwrap();
+        symlink(
+            "../../../../../../../../../../../../../../../..",
+            root.join("d/toroot"),
+        )
+        .unwrap();
+        let got = resolve_symlinks(root.join("d/toroot").to_str().unwrap());
+        assert_eq!(got, "/", "excessive .. must clamp at root, got {got}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_cycle_terminates_and_falls_back_no_grant() {
+        // A symlink cycle must terminate (bounded by MAX_SYMLINK_DEPTH) and fall
+        // back to the ORIGINAL path — which the kernel can't traverse (ELOOP),
+        // so Seatbelt denies it. It must never resolve to a usable grant.
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        symlink(root.join("b"), root.join("a")).unwrap();
+        symlink(root.join("a"), root.join("b")).unwrap();
+        let input = root.join("a");
+        let got = resolve_symlinks(input.to_str().unwrap());
+        assert_eq!(
+            got,
+            input.to_str().unwrap(),
+            "cycle must fall back to the input path, not a resolved grant"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn test_cap_short() {
         assert_eq!(Cap::READ.short(), "r----");
