@@ -1854,9 +1854,15 @@ mod tests {
         assert_eq!(result, "/usr/bin/ls");
     }
 
+    /// Serializes tests that mutate the process-global `PWD` env var. cargo runs
+    /// tests multi-threaded by default, so concurrent `set_var("PWD", …)` calls
+    /// race (a test can observe another's value). This lock makes them mutually
+    /// exclusive and therefore deterministic.
+    static PWD_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn resolve_relative_path_prepends_pwd() {
-        // SAFETY: test-only, single-threaded access
+        let _guard = PWD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("PWD").ok();
         unsafe { std::env::set_var("PWD", "/home/user/project") };
         let result = resolve_relative_path("src/main.rs");
@@ -1869,6 +1875,7 @@ mod tests {
 
     #[test]
     fn resolve_relative_path_empty() {
+        let _guard = PWD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("PWD").ok();
         unsafe { std::env::set_var("PWD", "/home/user") };
         let result = resolve_relative_path("");
@@ -1882,6 +1889,7 @@ mod tests {
 
     #[test]
     fn resolve_relative_path_no_leading_slash() {
+        let _guard = PWD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("PWD").ok();
         unsafe { std::env::set_var("PWD", "/workspace") };
         let result = resolve_relative_path("foo/bar.txt");

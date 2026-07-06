@@ -346,7 +346,7 @@ impl<'de> Deserialize<'de> for NetworkPolicy {
 /// not exist on the current system).
 pub fn resolve_symlinks(path: &str) -> String {
     use std::collections::VecDeque;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::path::{Component, Path, PathBuf};
 
     let path = Path::new(path);
@@ -354,21 +354,44 @@ pub fn resolve_symlinks(path: &str) -> String {
         return path.to_string_lossy().into_owned();
     }
 
+    // Flatten a path into a work queue of segments, preserving `..` and `.`.
+    // These traversal segments MUST be kept: a relative symlink target such as
+    // Homebrew's `bin/flatc -> ../Cellar/.../flatc` depends on the `..` to climb
+    // out of the link's directory. Dropping it resolves to a bogus path (e.g.
+    // `.../bin/Cellar/.../flatc`) that never matches the real binary, so the
+    // Seatbelt profile denies executing it. Root/prefix segments are dropped
+    // because `resolved` is seeded at "/".
+    fn segments(p: &Path) -> Vec<OsString> {
+        p.components()
+            .filter_map(|c| match c {
+                Component::Normal(s) => Some(s.to_owned()),
+                Component::ParentDir => Some(OsString::from("..")),
+                Component::CurDir => Some(OsString::from(".")),
+                Component::RootDir | Component::Prefix(_) => None,
+            })
+            .collect()
+    }
+
     // Collect path components into a work queue so that symlink targets
     // can be spliced in for further resolution.
-    let mut pending: VecDeque<OsString> = path
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(s) => Some(s.to_owned()),
-            _ => None,
-        })
-        .collect();
+    let mut pending: VecDeque<OsString> = segments(path).into();
 
     let mut resolved = PathBuf::from("/");
     let mut symlink_depth: usize = 0;
     const MAX_SYMLINK_DEPTH: usize = 40;
 
     while let Some(component) = pending.pop_front() {
+        // Resolve traversal segments against the already-resolved prefix.
+        // Because every prefix component was resolved before we descended into
+        // it, popping on `..` yields the real parent directory.
+        if component.as_os_str() == OsStr::new("..") {
+            resolved.pop();
+            continue;
+        }
+        if component.as_os_str() == OsStr::new(".") {
+            continue;
+        }
+
         resolved.push(&component);
 
         if let Ok(target) = std::fs::read_link(&resolved) {
@@ -378,22 +401,16 @@ pub fn resolve_symlinks(path: &str) -> String {
             }
 
             // Splice the target's components into the front of the queue
-            // so they get resolved on subsequent iterations.
+            // so they get resolved on subsequent iterations. An absolute
+            // target restarts from root; a relative target resolves against
+            // the symlink's parent directory.
             if target.is_absolute() {
                 resolved = PathBuf::from("/");
             } else {
                 resolved.pop();
             }
 
-            let target_components: Vec<OsString> = target
-                .components()
-                .filter_map(|c| match c {
-                    Component::Normal(s) => Some(s.to_owned()),
-                    _ => None,
-                })
-                .collect();
-
-            for (i, tc) in target_components.into_iter().enumerate() {
+            for (i, tc) in segments(&target).into_iter().enumerate() {
                 pending.insert(i, tc);
             }
         }
@@ -617,6 +634,186 @@ impl ViolationAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_symlinks_follows_relative_parent_dir_target() {
+        // Regression: a relative symlink target with `..` (as Homebrew uses,
+        // `bin/tool -> ../Cellar/pkg/1.0/bin/tool`) must climb out of the
+        // link's directory. Previously the `..` was dropped, resolving to the
+        // bogus `.../bin/Cellar/...` and denying exec of the real binary.
+        use std::os::unix::fs::symlink;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let uniq = format!(
+            "clash_symlink_test_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let root = std::env::temp_dir().join(uniq);
+
+        let real_bin = root.join("Cellar/pkg/1.0/bin");
+        std::fs::create_dir_all(&real_bin).unwrap();
+        let real_tool = real_bin.join("tool");
+        std::fs::write(&real_tool, b"#!/bin/sh\n").unwrap();
+
+        let link_bin = root.join("bin");
+        std::fs::create_dir_all(&link_bin).unwrap();
+        let link = link_bin.join("tool");
+        symlink("../Cellar/pkg/1.0/bin/tool", &link).unwrap();
+
+        let got = resolve_symlinks(link.to_str().unwrap());
+        // Compare against the real path resolved the same way, so any symlinks
+        // in the temp-dir prefix (e.g. /tmp -> /private/tmp) cancel out.
+        let expect = resolve_symlinks(real_tool.to_str().unwrap());
+        assert_eq!(got, expect, "symlink must resolve to the real Cellar path");
+        assert!(
+            !got.contains("/bin/Cellar/"),
+            "must not append the target under bin/: {got}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── Adversarial symlink-resolution security tests ─────────────────────
+    //
+    // Security invariant: `resolve_symlinks` must equal the KERNEL's canonical
+    // resolution. Seatbelt matches real syscall paths against the profile's
+    // subpaths (it does its own symlink resolution at runtime), so as long as
+    // clash grants exactly the kernel-canonical target, it can never grant a
+    // path broader than where the symlink actually points. These tests craft
+    // hostile symlinks and assert clash == `std::fs::canonicalize`.
+
+    #[cfg(unix)]
+    fn sym_tmp_root() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static C: AtomicUsize = AtomicUsize::new(0);
+        // Canonicalize the temp base so the constructed portion is firmlink-free
+        // (macOS $TMPDIR sits under the /var firmlink); then clash — which skips
+        // firmlinks by design — and canonicalize agree on the whole path.
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let d = base.join(format!(
+            "clash_symsec_{}_{}",
+            std::process::id(),
+            C.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[cfg(unix)]
+    fn assert_eq_kernel(link: &std::path::Path) {
+        let got = resolve_symlinks(link.to_str().unwrap());
+        let kernel = std::fs::canonicalize(link).unwrap();
+        assert_eq!(
+            std::path::Path::new(&got),
+            kernel.as_path(),
+            "resolve_symlinks must equal kernel canonicalize for {link:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_dot_segments_match_kernel() {
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/f"), b"x").unwrap();
+        symlink("./sub/./f", root.join("link")).unwrap();
+        assert_eq_kernel(&root.join("link"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_chained_parentdir_links_match_kernel() {
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        std::fs::create_dir_all(root.join("x")).unwrap();
+        std::fs::create_dir_all(root.join("y")).unwrap();
+        std::fs::create_dir_all(root.join("z")).unwrap();
+        std::fs::write(root.join("y/file"), b"x").unwrap();
+        // z/l1 -> ../x/l2 -> ../y/file : every hop climbs via `..`.
+        symlink("../y/file", root.join("x/l2")).unwrap();
+        symlink("../x/l2", root.join("z/l1")).unwrap();
+        assert_eq_kernel(&root.join("z/l1"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_absolute_target_matches_kernel() {
+        // Absolute targets were already followed before the fix; confirm the
+        // fix keeps them equal to the kernel (no behavior change for this case).
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        std::fs::write(root.join("real"), b"x").unwrap();
+        symlink(root.join("real"), root.join("abs")).unwrap();
+        assert_eq_kernel(&root.join("abs"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_hostile_parentdir_climb_matches_kernel_no_overshoot() {
+        // A rule-path symlink crafted to climb out with `..` must resolve to
+        // EXACTLY where it points (kernel truth), never to a broader ancestor
+        // than the target itself.
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        std::fs::create_dir_all(root.join("a/b/c/d")).unwrap();
+        std::fs::write(root.join("a/b/marker"), b"x").unwrap();
+        // from a/b/c/d, `../../marker` == a/b/marker
+        symlink("../../marker", root.join("a/b/c/d/link")).unwrap();
+        let got = resolve_symlinks(root.join("a/b/c/d/link").to_str().unwrap());
+        assert_eq!(
+            std::path::Path::new(&got),
+            std::fs::canonicalize(root.join("a/b/c/d/link"))
+                .unwrap()
+                .as_path()
+        );
+        assert!(got.ends_with("/a/b/marker"), "resolved to {got}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_parentdir_cannot_climb_above_root() {
+        // Absurdly many `..` must clamp at "/" (as the kernel does), never
+        // producing an above-root or garbage grant.
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        std::fs::create_dir_all(root.join("d")).unwrap();
+        symlink(
+            "../../../../../../../../../../../../../../../..",
+            root.join("d/toroot"),
+        )
+        .unwrap();
+        let got = resolve_symlinks(root.join("d/toroot").to_str().unwrap());
+        assert_eq!(got, "/", "excessive .. must clamp at root, got {got}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sym_cycle_terminates_and_falls_back_no_grant() {
+        // A symlink cycle must terminate (bounded by MAX_SYMLINK_DEPTH) and fall
+        // back to the ORIGINAL path — which the kernel can't traverse (ELOOP),
+        // so Seatbelt denies it. It must never resolve to a usable grant.
+        use std::os::unix::fs::symlink;
+        let root = sym_tmp_root();
+        symlink(root.join("b"), root.join("a")).unwrap();
+        symlink(root.join("a"), root.join("b")).unwrap();
+        let input = root.join("a");
+        let got = resolve_symlinks(input.to_str().unwrap());
+        assert_eq!(
+            got,
+            input.to_str().unwrap(),
+            "cycle must fall back to the input path, not a resolved grant"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn test_cap_short() {
