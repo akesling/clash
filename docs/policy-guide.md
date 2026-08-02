@@ -367,6 +367,37 @@ Sandbox network access has five modes:
 
 Subdomain matching is supported: `"github.com"` also permits `api.github.com`.
 
+### System capabilities
+
+Some workloads need narrow kernel services beyond filesystem and network access. These are opt-in per sandbox via `system=`:
+
+```python
+bazel_env = sandbox(
+    name = "bazel",
+    default = deny(),
+    fs = {
+        "$PWD": allow("rwcd"),
+    },
+    net = localhost(),
+    system = ["power", "localhost_serve"],
+)
+```
+
+- `"power"` -- receive power-management (sleep/wake) notifications. Required by JVM-based build servers: Bazel registers via `IORegisterForSystemPower()` at startup and aborts if the call fails. On macOS this compiles to an `iokit-open` allowance scoped to the power-management user client only, never a blanket IOKit grant. On Linux it is a no-op (no IOKit).
+- `"localhost_serve"` -- bind and accept connections on loopback ports. Required by tools with a client/server split over localhost (Bazel's gRPC server, dev servers under test). Outbound access is still governed by the net policy.
+
+Sandboxes that don't pass `system=` are unaffected.
+
+> **`localhost_serve` opens a channel out of the sandbox.** A listening socket is reachable by *any* process on the machine — your browser, another agent, a shell you type into — including from a sandbox whose net policy is `deny()`. It is a bidirectional channel that the network policy does not close. Grant it only to workloads that genuinely need to serve, and prefer `net = localhost()` over `deny()` there so the table reads honestly. `clash status` marks such sandboxes as `deny+serve` / `localhost+serve` rather than a bare `deny`.
+
+**Port scoping**: with `net = localhost(ports=[...])`, serving is restricted to those same ports on macOS. Under any other net policy, serving covers all loopback ports.
+
+**Platform differences**: on macOS, Seatbelt enforces both the loopback restriction and the port list at the kernel level. On Linux, seccomp cannot dereference the `sockaddr` argument, so the same limitation that makes `Localhost` advisory applies here: a sandbox granted `localhost_serve` can bind `0.0.0.0` and any port, exposing the listener beyond loopback. Treat `localhost_serve` as macOS-strict and Linux-advisory when writing portable policies.
+
+### Signalling
+
+All sandboxed processes may signal other processes **within the same sandbox instance** — a build client health-checking its own server, a shell killing a backgrounded child. Signalling anything outside the sandbox is denied, including processes running under an identical profile in a *different* sandbox instance.
+
 ---
 
 ## Starlark API Reference

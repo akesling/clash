@@ -271,7 +271,7 @@ mod tests {
     use serde_json::json;
 
     use crate::policy::sandbox_types::{
-        NetworkPolicy, PathMatch, RuleEffect, SandboxRule, ViolationAction,
+        NetworkPolicy, PathMatch, RuleEffect, SandboxRule, SystemCap, ViolationAction,
     };
 
     use formatter::BlockedPath;
@@ -403,6 +403,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         // Path outside /project -> likely violation
@@ -426,6 +427,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         // Path inside /project with full caps -> not a violation
@@ -442,6 +444,7 @@ mod tests {
             default: Cap::READ | Cap::WRITE | Cap::CREATE | Cap::EXECUTE,
             rules: vec![],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         // Default grants write+create -> not a violation even for foreign paths
@@ -538,6 +541,7 @@ mod tests {
             default: Cap::READ | Cap::EXECUTE,
             rules: vec![],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let violations = vec![
@@ -562,6 +566,7 @@ mod tests {
             default: Cap::READ | Cap::EXECUTE,
             rules: vec![],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let violations = vec![
@@ -632,6 +637,7 @@ mod tests {
             default: Cap::READ | Cap::EXECUTE,
             rules: vec![],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let violations = vec![crate::audit::SandboxViolation {
@@ -654,6 +660,7 @@ mod tests {
             default: Cap::READ | Cap::EXECUTE,
             rules: vec![],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let violations = vec![crate::audit::SandboxViolation {

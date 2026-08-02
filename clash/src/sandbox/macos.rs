@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use crate::policy::sandbox_types::{
-    Cap, NetworkPolicy, PathMatch, RuleEffect, SandboxPolicy, resolve_symlinks,
+    Cap, NetworkPolicy, PathMatch, RuleEffect, SandboxPolicy, SystemCap, resolve_symlinks,
 };
 use tracing::{Level, instrument};
 
@@ -62,8 +62,22 @@ pub fn compile_to_sbpl(policy: &SandboxPolicy, cwd: &str) -> String {
     p += "(allow mach-lookup)\n";
     p += "(allow mach-register)\n";
 
+    // Processes must be able to signal within the sandbox (e.g. a build
+    // client health-checking its own server via kill(pid, 0), or a shell
+    // killing a backgrounded child). Scoped to same-sandbox targets so
+    // outside processes stay untouchable.
+    p += "(allow signal (target same-sandbox))\n";
+
     // DNS resolution via mDNSResponder
     p += "(allow system-socket)\n";
+
+    // Opt-in system capabilities
+    if policy.system.contains(SystemCap::POWER) {
+        // Power-management notifications: exactly the IOKit user client
+        // that IORegisterForSystemPower() opens, nothing broader. Bazel's
+        // server (JVM) CHECK-fails at startup without this.
+        p += "(allow iokit-open (iokit-user-client-class \"RootDomainUserClient\"))\n";
+    }
 
     // Default capabilities applied to root
     emit_caps_for_path(&mut p, "/", policy.default, PathMatch::Subpath);
@@ -179,9 +193,41 @@ pub fn compile_to_sbpl(policy: &SandboxPolicy, cwd: &str) -> String {
         );
     }
 
+    // Serving on loopback is orthogonal to the outbound network policy:
+    // emit the bind/inbound allowances before each restrictive branch's
+    // blanket deny so the filtered allows take precedence (same pattern
+    // as the existing localhost-outbound rule). NetworkPolicy::Allow
+    // already covers serving via `(allow network*)`.
+    //
+    // `ports` scopes serving to the same TCP ports the outbound policy
+    // names: a sandbox that declares localhost(ports=[8080]) must not be
+    // able to serve on any other port. `None` means every loopback port.
+    let localhost_serve = policy.system.contains(SystemCap::LOCALHOST_SERVE);
+    let emit_localhost_serve = |p: &mut String, ports: Option<&[u16]>| {
+        if !localhost_serve {
+            return;
+        }
+        match ports {
+            Some(ports) => {
+                for port in ports {
+                    *p += &format!("(allow network-bind (local tcp \"localhost:{}\"))\n", port);
+                    *p += &format!(
+                        "(allow network-inbound (local tcp \"localhost:{}\"))\n",
+                        port
+                    );
+                }
+            }
+            None => {
+                *p += "(allow network-bind (local ip \"localhost:*\"))\n";
+                *p += "(allow network-inbound (local ip \"localhost:*\"))\n";
+            }
+        }
+    };
+
     // Network
     match &policy.network {
         NetworkPolicy::Deny => {
+            emit_localhost_serve(&mut p, None);
             p += "(deny network*)\n";
         }
         NetworkPolicy::Allow => {
@@ -194,6 +240,7 @@ pub fn compile_to_sbpl(policy: &SandboxPolicy, cwd: &str) -> String {
                     port
                 );
             }
+            emit_localhost_serve(&mut p, Some(ports));
             p += "(deny network*)\n";
         }
         NetworkPolicy::Localhost | NetworkPolicy::AllowDomains(_) => {
@@ -205,6 +252,7 @@ pub fn compile_to_sbpl(policy: &SandboxPolicy, cwd: &str) -> String {
             // host — raw IPs like "127.0.0.1" are not valid. "localhost" covers
             // both IPv4 (127.0.0.1) and IPv6 (::1) loopback.
             p += "(allow network-outbound (remote ip \"localhost:*\"))\n";
+            emit_localhost_serve(&mut p, None);
             p += "(deny network*)\n";
         }
     }
@@ -389,6 +437,7 @@ mod tests {
             default: Cap::READ | Cap::EXECUTE,
             rules: vec![],
             network: NetworkPolicy::Localhost,
+            system: SystemCap::empty(),
             doc: None,
         };
         let profile = compile_to_sbpl(&policy, "/tmp");
@@ -400,6 +449,117 @@ mod tests {
             profile.contains("(deny network*)"),
             "Localhost policy should deny all other network"
         );
+    }
+
+    // ── System capabilities SBPL ───────────────────────────────────
+
+    fn policy_with_system(system: SystemCap, network: NetworkPolicy) -> SandboxPolicy {
+        SandboxPolicy {
+            default: Cap::READ | Cap::EXECUTE,
+            rules: vec![],
+            network,
+            system,
+            doc: None,
+        }
+    }
+
+    #[test]
+    fn sbpl_signal_same_sandbox_always_allowed() {
+        let profile = compile_to_sbpl(
+            &policy_with_system(SystemCap::empty(), NetworkPolicy::Deny),
+            "/tmp",
+        );
+        assert!(profile.contains("(allow signal (target same-sandbox))"));
+    }
+
+    #[test]
+    fn sbpl_no_system_caps_emits_no_iokit_or_serve() {
+        let profile = compile_to_sbpl(
+            &policy_with_system(SystemCap::empty(), NetworkPolicy::Localhost),
+            "/tmp",
+        );
+        assert!(!profile.contains("iokit-open"));
+        assert!(!profile.contains("network-bind"));
+        assert!(!profile.contains("network-inbound"));
+    }
+
+    #[test]
+    fn sbpl_power_emits_scoped_iokit_open() {
+        let profile = compile_to_sbpl(
+            &policy_with_system(SystemCap::POWER, NetworkPolicy::Deny),
+            "/tmp",
+        );
+        assert!(
+            profile
+                .contains("(allow iokit-open (iokit-user-client-class \"RootDomainUserClient\"))"),
+            "POWER must grant only the power-management user client\nprofile:\n{profile}"
+        );
+        // Never a blanket iokit grant.
+        assert!(!profile.contains("(allow iokit-open)\n"));
+    }
+
+    #[test]
+    fn sbpl_localhost_serve_emits_bind_and_inbound_before_deny() {
+        for network in [
+            NetworkPolicy::Deny,
+            NetworkPolicy::Localhost,
+            NetworkPolicy::AllowDomains(vec!["example.com".into()]),
+        ] {
+            let profile = compile_to_sbpl(
+                &policy_with_system(SystemCap::LOCALHOST_SERVE, network),
+                "/tmp",
+            );
+            let bind_pos = profile
+                .find("(allow network-bind (local ip \"localhost:*\"))")
+                .expect("should allow loopback bind");
+            let inbound_pos = profile
+                .find("(allow network-inbound (local ip \"localhost:*\"))")
+                .expect("should allow loopback inbound");
+            let deny_pos = profile
+                .find("(deny network*)")
+                .expect("restrictive policies keep the blanket deny");
+            assert!(
+                bind_pos < deny_pos && inbound_pos < deny_pos,
+                "serve allows must precede the blanket deny (matching the \
+                 existing localhost-outbound placement)\nprofile:\n{profile}"
+            );
+        }
+    }
+
+    #[test]
+    fn sbpl_localhost_serve_is_scoped_to_declared_ports() {
+        // A sandbox that declares localhost(ports=[8080]) must not be able to
+        // serve on any other port — the port list has to constrain inbound the
+        // same way it constrains outbound.
+        let profile = compile_to_sbpl(
+            &policy_with_system(
+                SystemCap::LOCALHOST_SERVE,
+                NetworkPolicy::LocalhostPorts(vec![8080, 3000]),
+            ),
+            "/tmp",
+        );
+        for port in [8080, 3000] {
+            assert!(
+                profile.contains(&format!(
+                    "(allow network-bind (local tcp \"localhost:{port}\"))"
+                )),
+                "declared port {port} should be bindable\nprofile:\n{profile}"
+            );
+        }
+        assert!(
+            !profile.contains("network-bind (local ip \"localhost:*\")"),
+            "port-scoped policy must not emit a wildcard bind\nprofile:\n{profile}"
+        );
+    }
+
+    #[test]
+    fn sbpl_localhost_serve_with_allow_network_is_noop() {
+        let profile = compile_to_sbpl(
+            &policy_with_system(SystemCap::LOCALHOST_SERVE, NetworkPolicy::Allow),
+            "/tmp",
+        );
+        assert!(profile.contains("(allow network*)"));
+        assert!(!profile.contains("network-bind"));
     }
 
     // ── Rule specificity ordering ─────────────────────────────────
@@ -429,6 +589,7 @@ mod tests {
                 },
             ],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let profile = compile_to_sbpl(&policy, "/tmp");
@@ -472,6 +633,7 @@ mod tests {
                 },
             ],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let profile = compile_to_sbpl(&policy, "/tmp");
@@ -519,6 +681,7 @@ mod tests {
                 },
             ],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let profile = compile_to_sbpl(&policy, "/tmp");
@@ -549,12 +712,14 @@ mod tests {
             default: Cap::READ | Cap::EXECUTE,
             rules: vec![],
             network: NetworkPolicy::Localhost,
+            system: SystemCap::empty(),
             doc: None,
         };
         let domains_policy = SandboxPolicy {
             default: Cap::READ | Cap::EXECUTE,
             rules: vec![],
             network: NetworkPolicy::AllowDomains(vec!["example.com".into()]),
+            system: SystemCap::empty(),
             doc: None,
         };
         let localhost_profile = compile_to_sbpl(&localhost_policy, "/tmp");
@@ -569,6 +734,7 @@ mod tests {
             default: Cap::READ | Cap::EXECUTE,
             rules: vec![],
             network: NetworkPolicy::LocalhostPorts(vec![8080, 3000]),
+            system: SystemCap::empty(),
             doc: None,
         };
         let profile = compile_to_sbpl(&policy, "/tmp");

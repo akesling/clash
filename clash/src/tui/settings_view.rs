@@ -217,6 +217,7 @@ mod tests {
                 default: crate::policy::sandbox_types::Cap::READ,
                 rules: vec![],
                 network: crate::policy::sandbox_types::NetworkPolicy::Deny,
+                system: SystemCap::empty(),
                 doc: None,
             },
         );
@@ -226,6 +227,7 @@ mod tests {
                 default: crate::policy::sandbox_types::Cap::READ,
                 rules: vec![],
                 network: crate::policy::sandbox_types::NetworkPolicy::Deny,
+                system: SystemCap::empty(),
                 doc: None,
             },
         );

@@ -23,6 +23,28 @@ pub fn clash_globals() -> starlark::environment::Globals {
 /// Walk the Starlark call stack and return the source location of the first
 /// frame that isn't from the stdlib (`@clash//` prefix). This gives us the
 /// user's policy file and line number, e.g. `policy.star:3:1`.
+/// Unpack a Starlark value that should be `None` or a list/tuple of strings.
+fn unpack_string_seq(value: Value, what: &str) -> anyhow::Result<Vec<String>> {
+    if value.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let items: Vec<Value> = if let Some(list) = starlark::values::list::ListRef::from_value(value) {
+        list.iter().collect()
+    } else if let Some(tup) = starlark::values::tuple::TupleRef::from_value(value) {
+        tup.iter().collect()
+    } else {
+        anyhow::bail!("{what} must be a list of strings, got {}", value.get_type());
+    };
+    for item in items {
+        let s = item.unpack_str().ok_or_else(|| {
+            anyhow::anyhow!("{what} entries must be strings, got {}", item.get_type())
+        })?;
+        out.push(s.to_string());
+    }
+    Ok(out)
+}
+
 fn caller_source_location(eval: &Evaluator) -> Option<String> {
     let stack = eval.call_stack();
     for frame in &stack.frames {
@@ -290,6 +312,7 @@ fn register_globals(builder: &mut GlobalsBuilder) {
         #[starlark(require = pos)] tree: Value<'v>,
         #[starlark(require = named, default = "deny")] default: &str,
         #[starlark(require = named, default = starlark::values::none::NoneType)] doc: Value<'v>,
+        #[starlark(require = named, default = starlark::values::none::NoneType)] system: Value<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let heap = eval.heap();
@@ -302,9 +325,67 @@ fn register_globals(builder: &mut GlobalsBuilder) {
                 )
             })?;
         let doc_str = doc.unpack_str().map(|s| s.to_string());
+        let system_caps = unpack_string_seq(system, "sandbox() system=")?;
         let source = caller_source_location(eval);
-        let sb_json = crate::when::sandbox_tree_impl(name, tree, default, doc_str, heap, source)?;
+        let sb_json = crate::when::sandbox_tree_impl(
+            name,
+            tree,
+            default,
+            system_caps,
+            doc_str,
+            heap,
+            source,
+        )?;
         ctx.register_sandbox(name, sb_json)?;
         Ok(NoneType)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use starlark::values::Heap;
+    use starlark::values::list::AllocList;
+
+    // `unpack_string_seq` is defence in depth: `std.star` validates `system=`
+    // before calling `_sandbox_impl`, so these error paths are not reachable
+    // through the public DSL today. They are tested directly so the contract
+    // survives a future caller that skips the Starlark-side validation.
+
+    #[test]
+    fn none_unpacks_to_empty() {
+        let v = Value::new_none();
+        assert!(unpack_string_seq(v, "system=").unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_of_strings_unpacks_in_order() {
+        let heap = Heap::new();
+        let v = heap.alloc(AllocList(["power", "localhost_serve"]));
+        assert_eq!(
+            unpack_string_seq(v, "system=").unwrap(),
+            vec!["power".to_string(), "localhost_serve".to_string()]
+        );
+    }
+
+    #[test]
+    fn non_sequence_is_rejected_with_context() {
+        let heap = Heap::new();
+        let v = heap.alloc("power");
+        let err = unpack_string_seq(v, "sandbox() system=").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("must be a list of strings"), "got: {msg}");
+        assert!(msg.contains("sandbox() system="), "got: {msg}");
+    }
+
+    #[test]
+    fn non_string_entry_is_rejected() {
+        let heap = Heap::new();
+        let v = heap.alloc(AllocList([1i32, 2i32]));
+        let err = unpack_string_seq(v, "system=").unwrap_err();
+        assert!(
+            format!("{err}").contains("entries must be strings"),
+            "got: {err}"
+        );
     }
 }

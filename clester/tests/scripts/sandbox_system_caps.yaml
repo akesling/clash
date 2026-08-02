@@ -1,0 +1,61 @@
+meta:
+  name: sandbox system capabilities — CLI authoring
+  description: >
+    `clash sandbox create --system` must validate capability names before
+    touching the policy file, and must emit a system= kwarg that survives
+    re-evaluation of the policy.
+
+clash:
+  policy_star: |
+    settings(default = deny())
+    policy("test", default = deny(), rules = [])
+
+steps:
+  - name: unknown capability is rejected
+    command: sandbox create bad --default "read + execute" --network deny --system bogus --scope user
+    expect:
+      not:
+        exit_code: 0
+
+  - name: rejection names the valid capabilities
+    command: sandbox create bad --default "read + execute" --network deny --system bogus --scope user
+    expect:
+      stderr_contains: "power"
+
+  - name: the rejected sandbox was never written
+    command: sandbox list
+    expect:
+      exit_code: 0
+      not:
+        stdout_contains: "bad"
+
+  - name: valid capabilities are accepted
+    command: sandbox create bazel --default "read + execute" --network localhost --system power --system localhost_serve --scope user
+    expect:
+      exit_code: 0
+      stdout_contains: "bazel"
+
+  - name: the emitted policy carries the system kwarg
+    command: sandbox list
+    expect:
+      exit_code: 0
+      files:
+        - path: .clash/policy.star
+          root: home
+          exists: true
+          contains: 'system = ["power", "localhost_serve"]'
+
+  - name: delete the capability-granting sandbox
+    command: sandbox delete bazel --scope user
+    expect:
+      exit_code: 0
+
+  - name: a sandbox created without --system gains no system kwarg
+    command: sandbox create plain --default "read + execute" --network deny --scope user
+    expect:
+      exit_code: 0
+      not:
+        files:
+          - path: .clash/policy.star
+            root: home
+            contains: "system"

@@ -286,6 +286,7 @@ pub fn add_sandbox(
     name: &str,
     default_effect: Effect,
     net_allow: bool,
+    system: &[String],
 ) -> Result<(), String> {
     // Check for duplicates
     if find_sandboxes(stmts).iter().any(|(_, n)| n == name) {
@@ -303,6 +304,12 @@ pub fn add_sandbox(
         kw.push(("net", builder::allow()));
     } else {
         kw.push(("net", builder::deny()));
+    }
+    if !system.is_empty() {
+        kw.push((
+            "system",
+            Expr::List(system.iter().map(Expr::string).collect()),
+        ));
     }
 
     let sandbox_expr = builder::sandbox(name, kw);
@@ -583,7 +590,7 @@ policy("test", default = deny(), rules = [when({"Read": allow()})])
     #[test]
     fn add_sandbox_inserts_before_settings() {
         let mut stmts = policy_stmts();
-        add_sandbox(&mut stmts, "dev", Effect::Deny, true).unwrap();
+        add_sandbox(&mut stmts, "dev", Effect::Deny, true, &[]).unwrap();
         let src = serialize(&stmts);
         assert!(src.contains("sandbox(name = \"dev\""), "got:\n{src}");
         // sandbox should appear before settings
@@ -596,17 +603,43 @@ policy("test", default = deny(), rules = [when({"Read": allow()})])
     }
 
     #[test]
+    fn add_sandbox_emits_system_caps() {
+        let mut stmts = policy_stmts();
+        add_sandbox(
+            &mut stmts,
+            "bazel",
+            Effect::Deny,
+            false,
+            &["power".to_string(), "localhost_serve".to_string()],
+        )
+        .unwrap();
+        let src = serialize(&stmts);
+        assert!(
+            src.contains("system = [\"power\", \"localhost_serve\"]"),
+            "got:\n{src}"
+        );
+    }
+
+    #[test]
+    fn add_sandbox_without_system_emits_no_kwarg() {
+        let mut stmts = policy_stmts();
+        add_sandbox(&mut stmts, "plain", Effect::Deny, false, &[]).unwrap();
+        let src = serialize(&stmts);
+        assert!(!src.contains("system"), "got:\n{src}");
+    }
+
+    #[test]
     fn add_sandbox_duplicate_errors() {
         let mut stmts = policy_stmts();
-        add_sandbox(&mut stmts, "dev", Effect::Deny, true).unwrap();
-        let err = add_sandbox(&mut stmts, "dev", Effect::Deny, true).unwrap_err();
+        add_sandbox(&mut stmts, "dev", Effect::Deny, true, &[]).unwrap();
+        let err = add_sandbox(&mut stmts, "dev", Effect::Deny, true, &[]).unwrap_err();
         assert!(err.contains("already exists"), "got: {err}");
     }
 
     #[test]
     fn remove_sandbox_works() {
         let mut stmts = policy_stmts();
-        add_sandbox(&mut stmts, "dev", Effect::Deny, true).unwrap();
+        add_sandbox(&mut stmts, "dev", Effect::Deny, true, &[]).unwrap();
         remove_sandbox(&mut stmts, "dev").unwrap();
         let src = serialize(&stmts);
         assert!(!src.contains("sandbox(name"), "got:\n{src}");

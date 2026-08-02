@@ -7,7 +7,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::policy::sandbox_types::{Cap, NetworkPolicy, PathMatch, RuleEffect, SandboxPolicy};
+use crate::policy::sandbox_types::{
+    Cap, NetworkPolicy, PathMatch, RuleEffect, SandboxPolicy, SystemCap,
+};
 use landlock::{
     ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
     RulesetCreatedAttr, RulesetStatus,
@@ -32,28 +34,34 @@ pub fn exec_sandboxed(
     // 1. Set NO_NEW_PRIVS (must come before seccomp and landlock)
     set_no_new_privs()?;
 
-    // 2. Install seccomp network filter based on network policy
+    // 2. Install seccomp network filter based on network policy.
+    //
+    // `localhost_serve` unblocks the server-side syscalls. Restricting the
+    // listener to loopback is advisory on Linux (seccomp cannot dereference
+    // the sockaddr), matching how the outbound side is already handled.
+    let localhost_serve = policy.system.contains(SystemCap::LOCALHOST_SERVE);
     match &policy.network {
         NetworkPolicy::Deny => {
-            install_seccomp_network_filter()?;
+            install_seccomp_network_filter(localhost_serve)?;
         }
         NetworkPolicy::Localhost => {
             // Localhost-only: seccomp cannot filter connect() by destination
             // address, so this is advisory. Block bind/listen/accept to prevent
             // server-side operations.
-            install_seccomp_advisory_network_filter()?;
+            install_seccomp_advisory_network_filter(localhost_serve)?;
         }
         NetworkPolicy::LocalhostPorts(_) => {
             // Port-level filtering is not enforceable via seccomp (can't inspect
-            // connect() sockaddr). Same advisory behavior as Localhost.
-            install_seccomp_advisory_network_filter()?;
+            // connect() sockaddr). Same advisory behavior as Localhost — including
+            // for serving, so the declared port list does not constrain bind().
+            install_seccomp_advisory_network_filter(localhost_serve)?;
         }
         NetworkPolicy::AllowDomains(_) => {
             // On Linux, seccomp cannot filter connect() by destination address
             // (the address arg is a pointer seccomp can't dereference). We allow
             // outbound connections and rely on the HTTP proxy for domain filtering.
             // This is advisory: programs that bypass HTTP_PROXY can reach any host.
-            install_seccomp_advisory_network_filter()?;
+            install_seccomp_advisory_network_filter(localhost_serve)?;
         }
         NetworkPolicy::Allow => {
             // No filter needed
@@ -220,50 +228,96 @@ fn add_path_rule(
 /// Blocks socket creation for non-AF_UNIX domains, and blocks most
 /// network-related syscalls outright. AF_UNIX is preserved for IPC
 /// (tools like cargo use socketpair internally).
+///
+/// When `localhost_serve` is set, the server-side syscalls are permitted and
+/// AF_INET/AF_INET6 sockets may be created, while `connect` and the datagram
+/// send paths stay blocked — the process can accept connections but still
+/// cannot reach out. seccomp cannot dereference the `sockaddr` argument, so
+/// the *loopback* half of the restriction is advisory on Linux: a process
+/// granted `localhost_serve` can bind `0.0.0.0` too. This matches the existing
+/// advisory treatment of `Localhost`/`LocalhostPorts`.
 #[instrument(level = Level::TRACE)]
-fn install_seccomp_network_filter() -> Result<(), SandboxError> {
+fn install_seccomp_network_filter(localhost_serve: bool) -> Result<(), SandboxError> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
 
-    // Block these network syscalls unconditionally
-    let deny_syscalls = [
-        libc::SYS_connect,
-        libc::SYS_accept,
-        libc::SYS_accept4,
-        libc::SYS_bind,
-        libc::SYS_listen,
-        libc::SYS_getpeername,
-        libc::SYS_getsockname,
-        libc::SYS_shutdown,
-        libc::SYS_sendto,
-        libc::SYS_sendmmsg,
-        libc::SYS_recvmmsg,
-        libc::SYS_getsockopt,
-        libc::SYS_setsockopt,
-        // Also block ptrace for security
-        libc::SYS_ptrace,
-    ];
+    let deny_syscalls = deny_filter_syscalls(localhost_serve);
 
     for &syscall in &deny_syscalls {
         rules.insert(syscall, vec![]);
     }
 
-    // For socket() and socketpair(): only deny if domain != AF_UNIX
-    let unix_only_rule = SeccompRule::new(vec![
-        SeccompCondition::new(
-            0, // first argument: domain
-            SeccompCmpArgLen::Dword,
-            SeccompCmpOp::Ne,
-            libc::AF_UNIX as u64,
-        )
-        .map_err(|e| SandboxError::Apply(format!("seccomp condition: {}", e)))?,
-    ])
-    .map_err(|e| SandboxError::Apply(format!("seccomp rule: {}", e)))?;
+    // For socket() and socketpair(): deny domains the sandbox has no use for.
+    // AF_UNIX is always permitted for IPC; the IP families are added only when
+    // the sandbox may serve. Conditions within a rule are ANDed, so this denies
+    // only when the domain matches none of the permitted families.
+    let mut domain_conditions = vec![domain_is_not(libc::AF_UNIX)?];
+    if localhost_serve {
+        domain_conditions.push(domain_is_not(libc::AF_INET)?);
+        domain_conditions.push(domain_is_not(libc::AF_INET6)?);
+    }
+    let domain_rule = SeccompRule::new(domain_conditions)
+        .map_err(|e| SandboxError::Apply(format!("seccomp rule: {}", e)))?;
 
-    rules.insert(libc::SYS_socket, vec![unix_only_rule.clone()]);
-    rules.insert(libc::SYS_socketpair, vec![unix_only_rule]);
+    rules.insert(libc::SYS_socket, vec![domain_rule.clone()]);
+    rules.insert(libc::SYS_socketpair, vec![domain_rule]);
 
     let arch = seccomp_arch()?;
     apply_seccomp_filter(rules, arch)
+}
+
+/// Syscalls the `Deny` network filter blocks, given the serve capability.
+///
+/// Split out from filter installation so the policy decision is unit-testable
+/// without applying a real seccomp filter to the test process.
+fn deny_filter_syscalls(localhost_serve: bool) -> Vec<i64> {
+    // Blocked whether or not the sandbox may serve: the paths that reach *out*.
+    let mut syscalls = vec![
+        libc::SYS_connect,
+        libc::SYS_getpeername,
+        libc::SYS_shutdown,
+        libc::SYS_sendto,
+        libc::SYS_sendmmsg,
+        libc::SYS_recvmmsg,
+        // Also block ptrace for security
+        libc::SYS_ptrace,
+    ];
+
+    // Server-side syscalls, plus the socket introspection a listener needs.
+    if !localhost_serve {
+        syscalls.extend_from_slice(&[
+            libc::SYS_accept,
+            libc::SYS_accept4,
+            libc::SYS_bind,
+            libc::SYS_listen,
+            libc::SYS_getsockname,
+            libc::SYS_getsockopt,
+            libc::SYS_setsockopt,
+        ]);
+    }
+
+    syscalls
+}
+
+/// Syscalls the advisory (`Localhost`/`LocalhostPorts`/`AllowDomains`) filter
+/// blocks, given the serve capability.
+fn advisory_filter_syscalls(localhost_serve: bool) -> Vec<i64> {
+    let mut syscalls = vec![libc::SYS_ptrace];
+    if !localhost_serve {
+        // Block server-side operations
+        syscalls.extend_from_slice(&[
+            libc::SYS_accept,
+            libc::SYS_accept4,
+            libc::SYS_bind,
+            libc::SYS_listen,
+        ]);
+    }
+    syscalls
+}
+
+/// Build a "socket domain is not `family`" seccomp condition on argument 0.
+fn domain_is_not(family: libc::c_int) -> Result<SeccompCondition, SandboxError> {
+    SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, family as u64)
+        .map_err(|e| SandboxError::Apply(format!("seccomp condition: {}", e)))
 }
 
 /// Install a permissive seccomp filter for `AllowDomains` on Linux.
@@ -272,18 +326,15 @@ fn install_seccomp_network_filter() -> Result<(), SandboxError> {
 /// and outbound connections, but blocks bind/listen/accept to prevent the
 /// sandboxed process from running a server. Domain filtering is handled by
 /// the HTTP proxy, not seccomp.
+///
+/// When `localhost_serve` is set, the server-side syscalls are permitted.
+/// seccomp cannot inspect the bind address, so — as with the outbound
+/// destination — restricting the listener to loopback is advisory on Linux.
 #[instrument(level = Level::TRACE)]
-fn install_seccomp_advisory_network_filter() -> Result<(), SandboxError> {
+fn install_seccomp_advisory_network_filter(localhost_serve: bool) -> Result<(), SandboxError> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
 
-    // Block server-side operations and ptrace
-    let deny_syscalls = [
-        libc::SYS_accept,
-        libc::SYS_accept4,
-        libc::SYS_bind,
-        libc::SYS_listen,
-        libc::SYS_ptrace,
-    ];
+    let deny_syscalls = advisory_filter_syscalls(localhost_serve);
 
     for &syscall in &deny_syscalls {
         rules.insert(syscall, vec![]);
@@ -327,4 +378,77 @@ fn apply_seccomp_filter(
         .map_err(|e| SandboxError::Apply(format!("seccomp apply: {}", e)))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SERVER_SIDE: [i64; 4] = [
+        libc::SYS_accept,
+        libc::SYS_accept4,
+        libc::SYS_bind,
+        libc::SYS_listen,
+    ];
+
+    #[test]
+    fn deny_filter_without_serve_blocks_server_syscalls() {
+        let blocked = deny_filter_syscalls(false);
+        for sc in SERVER_SIDE {
+            assert!(blocked.contains(&sc), "syscall {sc} should be blocked");
+        }
+        // The pre-existing blocklist must be preserved exactly, so sandboxes
+        // that do not opt in see no change in behaviour.
+        for sc in [
+            libc::SYS_getsockname,
+            libc::SYS_getsockopt,
+            libc::SYS_setsockopt,
+        ] {
+            assert!(blocked.contains(&sc), "syscall {sc} should be blocked");
+        }
+    }
+
+    #[test]
+    fn deny_filter_with_serve_unblocks_server_syscalls_but_not_outbound() {
+        let blocked = deny_filter_syscalls(true);
+        for sc in SERVER_SIDE {
+            assert!(
+                !blocked.contains(&sc),
+                "localhost_serve must unblock syscall {sc}"
+            );
+        }
+        // Serving must not become a way to reach out.
+        for sc in [
+            libc::SYS_connect,
+            libc::SYS_sendto,
+            libc::SYS_sendmmsg,
+            libc::SYS_ptrace,
+        ] {
+            assert!(
+                blocked.contains(&sc),
+                "syscall {sc} must stay blocked even when serving"
+            );
+        }
+    }
+
+    #[test]
+    fn advisory_filter_serve_toggles_only_server_syscalls() {
+        let without = advisory_filter_syscalls(false);
+        let with = advisory_filter_syscalls(true);
+
+        for sc in SERVER_SIDE {
+            assert!(without.contains(&sc));
+            assert!(!with.contains(&sc));
+        }
+        // ptrace is blocked regardless — it is not a network concern.
+        assert!(without.contains(&libc::SYS_ptrace));
+        assert!(with.contains(&libc::SYS_ptrace));
+    }
+
+    #[test]
+    fn serve_capability_never_unblocks_ptrace() {
+        // Guards against a future refactor folding ptrace into the toggled set.
+        assert!(deny_filter_syscalls(true).contains(&libc::SYS_ptrace));
+        assert!(advisory_filter_syscalls(true).contains(&libc::SYS_ptrace));
+    }
 }

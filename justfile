@@ -29,14 +29,23 @@ clean-configs:
 clean-config: clean-configs
 
 # Install clash system-wide: binary to ~/.cargo/bin, plugin via Claude marketplace.
+#
+# Builds before uninstalling so a compile failure cannot leave the machine with
+# no clash binary. `--locked` is required: without it cargo install re-resolves
+# dependencies and picks a hashbrown that starlark_map does not compile against.
 install:
-    @just -q uninstall
-    cargo install --path clash
+    cargo install --path clash --locked
+    -rm -f ~/.local/bin/clash
+    @just -q uninstall-plugin
     clash init
 
-uninstall:
+# Remove just the plugin/marketplace registration, leaving the binary in place.
+uninstall-plugin:
     -claude plugin uninstall clash
     -claude plugin marketplace remove clash
+
+uninstall:
+    @just -q uninstall-plugin
     -rm ~/.local/bin/clash
     -rm ~/.cargo/bin/clash
 

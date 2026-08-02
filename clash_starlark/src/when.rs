@@ -485,6 +485,24 @@ fn process_policy_dict<'v>(
 // Sandbox conversion (replaces _sandbox_to_json / _resolve_path_value)
 // ---------------------------------------------------------------------------
 
+/// System capability names accepted by `sandbox(system=[...])`.
+/// Must stay in sync with `SystemCap::parse_single` in clash-policy.
+const SYSTEM_CAP_NAMES: &[&str] = &["power", "localhost_serve"];
+
+/// Validate a list of system capability names.
+pub fn validate_system_caps(system: &[String]) -> anyhow::Result<()> {
+    for name in system {
+        if !SYSTEM_CAP_NAMES.contains(&name.as_str()) {
+            bail!(
+                "unknown system capability '{}' (expected one of: {})",
+                name,
+                SYSTEM_CAP_NAMES.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Shared assembly: build the sandbox JSON from already-converted parts.
 /// Both the legacy struct path (`sandbox_to_json`) and the new tree path
 /// (`sandbox_tree_impl`) feed this function so the wire format stays in sync.
@@ -493,6 +511,7 @@ fn build_sandbox_json(
     default_effect: &str,
     rules: Vec<JsonValue>,
     network: JsonValue,
+    system: Vec<String>,
     doc: Option<String>,
 ) -> JsonValue {
     let default_caps = if default_effect == "deny" {
@@ -506,6 +525,12 @@ fn build_sandbox_json(
         "rules": rules,
         "network": network,
     });
+    if !system.is_empty() {
+        result
+            .as_object_mut()
+            .unwrap()
+            .insert("system".to_string(), json!(system));
+    }
     if let Some(d) = doc {
         result
             .as_object_mut()
@@ -671,10 +696,12 @@ pub fn sandbox_tree_impl<'v>(
     name: &str,
     tree: Value<'v>,
     default_effect_kwarg: &str,
+    system: Vec<String>,
     doc: Option<String>,
     heap: &'v Heap,
     _source: Option<String>,
 ) -> anyhow::Result<JsonValue> {
+    validate_system_caps(&system)?;
     let dict = DictRef::from_value(tree)
         .ok_or_else(|| anyhow::anyhow!("sandbox() tree must be a dict"))?;
 
@@ -789,6 +816,7 @@ pub fn sandbox_tree_impl<'v>(
         &default_effect,
         fs_rules,
         network,
+        system,
         doc,
     ))
 }
@@ -823,13 +851,39 @@ pub fn sandbox_to_json<'v>(sb: Value<'v>, heap: &'v Heap) -> anyhow::Result<Json
     // Network policy
     let net = convert_net_policy(sb, heap)?;
 
+    // System capabilities (optional `_system` tuple of strings)
+    let mut system: Vec<String> = Vec::new();
+    if let Ok(Some(system_val)) = sb.get_attr("_system", heap) {
+        if let Some(tup) = starlark::values::tuple::TupleRef::from_value(system_val) {
+            for item in tup.iter() {
+                if let Some(s) = item.unpack_str() {
+                    system.push(s.to_string());
+                }
+            }
+        } else if let Some(list) = ListRef::from_value(system_val) {
+            for item in list.iter() {
+                if let Some(s) = item.unpack_str() {
+                    system.push(s.to_string());
+                }
+            }
+        }
+    }
+    validate_system_caps(&system)?;
+
     let doc = sb
         .get_attr("_doc", heap)
         .ok()
         .flatten()
         .and_then(|v| v.unpack_str().map(|s| s.to_string()));
 
-    Ok(build_sandbox_json(&name, &default_effect, rules, net, doc))
+    Ok(build_sandbox_json(
+        &name,
+        &default_effect,
+        rules,
+        net,
+        system,
+        doc,
+    ))
 }
 
 fn convert_fs_rule<'v>(rule: Value<'v>, heap: &'v Heap) -> anyhow::Result<JsonValue> {

@@ -14,6 +14,7 @@ pub mod stdlib;
 pub mod test_support;
 pub use test_support::{TestModule, eval_policy_source_for_test, load_starlark_source_for_test};
 mod when;
+pub use when::validate_system_caps;
 
 use std::path::Path;
 

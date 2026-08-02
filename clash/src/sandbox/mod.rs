@@ -15,7 +15,7 @@ use tracing::{Level, info, instrument};
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+pub mod macos;
 pub mod proxy;
 
 /// Result of checking platform sandbox support.
@@ -328,7 +328,9 @@ pub(crate) fn do_exec(command: &[String]) -> Result<std::convert::Infallible, Sa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::sandbox_types::{Cap, NetworkPolicy, PathMatch, RuleEffect, SandboxRule};
+    use crate::policy::sandbox_types::{
+        Cap, NetworkPolicy, PathMatch, RuleEffect, SandboxRule, SystemCap,
+    };
 
     fn simple_policy() -> SandboxPolicy {
         SandboxPolicy {
@@ -352,6 +354,7 @@ mod tests {
                 },
             ],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         }
     }
@@ -401,6 +404,7 @@ mod tests {
             default: Cap::READ | Cap::EXECUTE,
             rules: vec![],
             network: NetworkPolicy::Allow,
+            system: SystemCap::empty(),
             doc: None,
         };
         let caps = policy.effective_caps("/any/path", "/cwd");
@@ -420,6 +424,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Allow,
+            system: SystemCap::empty(),
             doc: None,
         };
         let caps = policy.effective_caps("/tmp/file.txt", "/cwd");
@@ -439,6 +444,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Allow,
+            system: SystemCap::empty(),
             doc: None,
         };
         let caps = policy.effective_caps("/etc/passwd", "/cwd");
@@ -472,6 +478,7 @@ mod tests {
                 },
             ],
             network: NetworkPolicy::Allow,
+            system: SystemCap::empty(),
             doc: None,
         };
         // /data/file.txt: default READ + allow WRITE = READ | WRITE
@@ -499,6 +506,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Allow,
+            system: SystemCap::empty(),
             doc: None,
         };
         // Exact match → denied
@@ -520,6 +528,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Allow,
+            system: SystemCap::empty(),
             doc: None,
         };
         // Path outside /tmp → only default caps

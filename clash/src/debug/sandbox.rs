@@ -54,6 +54,13 @@ impl SandboxReport {
                     style::cyan("network"),
                     format_network(&sandbox.network),
                 ));
+                if !sandbox.system.is_empty() {
+                    lines.push(format!(
+                        "  {}:     {}",
+                        style::cyan("system"),
+                        sandbox.system.display(),
+                    ));
+                }
 
                 if !sandbox.rules.is_empty() {
                     lines.push(String::new());
@@ -317,7 +324,9 @@ fn format_network(network: &NetworkPolicy) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::sandbox_types::{NetworkPolicy, PathMatch, RuleEffect, SandboxRule};
+    use crate::policy::sandbox_types::{
+        NetworkPolicy, PathMatch, RuleEffect, SandboxRule, SystemCap,
+    };
 
     #[test]
     fn test_compute_notable_path_caps() {
@@ -332,6 +341,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
 

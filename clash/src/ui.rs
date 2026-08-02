@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use crate::policy::ir::PolicyDecision;
-use crate::policy::sandbox_types::SandboxPolicy;
+use crate::policy::sandbox_types::{SandboxPolicy, SystemCap};
 use crate::style;
 
 // ---------------------------------------------------------------------------
@@ -146,6 +146,31 @@ pub fn print_sandbox_summary(sandbox: &SandboxPolicy) {
     }
 }
 
+/// The `net` cell label for a sandbox in the status table.
+///
+/// A sandbox granted `localhost_serve` can accept loopback connections
+/// regardless of its outbound policy, so the label carries a `+serve` marker:
+/// a bare "deny" would read as "no network channel at all", which is not what
+/// the sandbox enforces.
+fn net_label(sb: &SandboxPolicy) -> String {
+    use crate::policy::sandbox_types::NetworkPolicy;
+
+    let base = match &sb.network {
+        NetworkPolicy::Deny => "deny",
+        NetworkPolicy::Allow => "allow",
+        NetworkPolicy::Localhost => "localhost",
+        NetworkPolicy::AllowDomains(_) => "proxy",
+        NetworkPolicy::LocalhostPorts(_) => "localhost",
+    };
+    // `Allow` already permits serving, so the marker would be noise.
+    if sb.system.contains(SystemCap::LOCALHOST_SERVE) && !matches!(sb.network, NetworkPolicy::Allow)
+    {
+        format!("{base}+serve")
+    } else {
+        base.to_string()
+    }
+}
+
 /// Print sandboxes as a compact matrix: paths down the left, sandbox names across the top.
 pub fn print_sandbox_table(sandboxes: &HashMap<String, SandboxPolicy>) {
     use crate::policy::sandbox_types::{NetworkPolicy, RuleEffect};
@@ -186,7 +211,15 @@ pub fn print_sandbox_table(sandboxes: &HashMap<String, SandboxPolicy>) {
         }
     }
 
-    let col_w = names.iter().map(|n| n.len()).max().unwrap_or(5).max(5);
+    let net_labels: Vec<String> = names.iter().map(|n| net_label(&sandboxes[*n])).collect();
+
+    let col_w = names
+        .iter()
+        .map(|n| n.len())
+        .chain(net_labels.iter().map(|l| l.len()))
+        .max()
+        .unwrap_or(5)
+        .max(5);
     let domain_max = domains.iter().map(|d| d.len()).max().unwrap_or(0);
     let path_w = paths
         .iter()
@@ -214,18 +247,41 @@ pub fn print_sandbox_table(sandboxes: &HashMap<String, SandboxPolicy>) {
     // Network row.
     let net: Vec<String> = names
         .iter()
-        .map(|n| {
+        .zip(&net_labels)
+        .map(|(n, label)| {
+            // A serve marker means the cell is no longer a plain "denied",
+            // so colour it as a restriction-with-caveat rather than red.
+            let serves = sandboxes[*n].system.contains(SystemCap::LOCALHOST_SERVE);
             let s = match &sandboxes[*n].network {
-                NetworkPolicy::Deny => style::red("deny"),
-                NetworkPolicy::Allow => style::green("allow"),
-                NetworkPolicy::Localhost => style::yellow("localhost"),
-                NetworkPolicy::AllowDomains(_) => style::yellow("proxy"),
-                NetworkPolicy::LocalhostPorts(_) => style::yellow("localhost"),
+                NetworkPolicy::Allow => style::green(label),
+                NetworkPolicy::Deny if !serves => style::red(label),
+                _ => style::yellow(label),
             };
             lpad(&s, col_w)
         })
         .collect();
     println!("  {} {}", rpad(&style::dim("net"), path_w), net.join(" "));
+
+    // System capability row (only when at least one sandbox opts in).
+    if names.iter().any(|n| !sandboxes[*n].system.is_empty()) {
+        let sys: Vec<String> = names
+            .iter()
+            .map(|n| {
+                let caps = &sandboxes[*n].system;
+                let cell = if caps.is_empty() {
+                    style::dim("·····")
+                } else {
+                    style::yellow(&caps.display())
+                };
+                lpad(&cell, col_w)
+            })
+            .collect();
+        println!(
+            "  {} {}",
+            rpad(&style::dim("system"), path_w),
+            sys.join(" ")
+        );
+    }
 
     // Domain rows.
     for domain in &domains {
@@ -290,4 +346,69 @@ fn rpad(s: &str, width: usize) -> String {
 
 fn lpad(s: &str, width: usize) -> String {
     console::pad_str(s, width, console::Alignment::Right, None).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::sandbox_types::{Cap, NetworkPolicy};
+
+    fn sb(network: NetworkPolicy, system: SystemCap) -> SandboxPolicy {
+        SandboxPolicy {
+            default: Cap::READ,
+            rules: vec![],
+            network,
+            system,
+            doc: None,
+        }
+    }
+
+    #[test]
+    fn net_label_is_unchanged_without_serve() {
+        assert_eq!(
+            net_label(&sb(NetworkPolicy::Deny, SystemCap::empty())),
+            "deny"
+        );
+        assert_eq!(
+            net_label(&sb(NetworkPolicy::Localhost, SystemCap::empty())),
+            "localhost"
+        );
+        assert_eq!(
+            net_label(&sb(
+                NetworkPolicy::AllowDomains(vec!["a.com".into()]),
+                SystemCap::empty()
+            )),
+            "proxy"
+        );
+    }
+
+    #[test]
+    fn net_label_marks_serving_sandboxes() {
+        // The point of the marker: "deny" alone would misrepresent a sandbox
+        // that can still accept inbound loopback connections.
+        assert_eq!(
+            net_label(&sb(NetworkPolicy::Deny, SystemCap::LOCALHOST_SERVE)),
+            "deny+serve"
+        );
+        assert_eq!(
+            net_label(&sb(NetworkPolicy::Localhost, SystemCap::LOCALHOST_SERVE)),
+            "localhost+serve"
+        );
+    }
+
+    #[test]
+    fn net_label_omits_marker_when_network_is_fully_allowed() {
+        assert_eq!(
+            net_label(&sb(NetworkPolicy::Allow, SystemCap::LOCALHOST_SERVE)),
+            "allow"
+        );
+    }
+
+    #[test]
+    fn net_label_ignores_unrelated_system_caps() {
+        assert_eq!(
+            net_label(&sb(NetworkPolicy::Deny, SystemCap::POWER)),
+            "deny"
+        );
+    }
 }

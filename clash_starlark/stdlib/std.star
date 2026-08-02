@@ -525,7 +525,24 @@ def localhost(ports=None, doc=None):
 # ---------------------------------------------------------------------------
 
 
-def _make_sandbox(name, default, fs_rules, net_policy, net_domain_names=None, doc=None):
+_SYSTEM_CAPS = ("power", "localhost_serve")
+
+
+def _validate_system(system):
+    """Validate sandbox system= capability names; returns a tuple."""
+    if system == None:
+        return ()
+    if type(system) != "list" and type(system) != "tuple":
+        fail("sandbox system= must be a list of capability names; got " + type(system))
+    for s in system:
+        if type(s) != "string":
+            fail("sandbox system= entries must be strings; got " + type(s))
+        if s not in _SYSTEM_CAPS:
+            fail("unknown system capability '" + s + "' (expected one of: " + ", ".join(_SYSTEM_CAPS) + ")")
+    return tuple(system)
+
+
+def _make_sandbox(name, default, fs_rules, net_policy, net_domain_names=None, doc=None, system=()):
     """Create a sandbox struct."""
     if net_domain_names == None:
         net_domain_names = []
@@ -535,6 +552,10 @@ def _make_sandbox(name, default, fs_rules, net_policy, net_domain_names=None, do
         updated_domains = net_domain_names + (
             other._net_domain_names if hasattr(other, "_net_domain_names") else []
         )
+        merged_system = list(system)
+        for s in (other._system if hasattr(other, "_system") else ()):
+            if s not in merged_system:
+                merged_system.append(s)
         return _make_sandbox(
             name,
             updated_default,
@@ -542,6 +563,7 @@ def _make_sandbox(name, default, fs_rules, net_policy, net_domain_names=None, do
             net_policy or other._net_policy,
             updated_domains,
             doc=doc,
+            system=tuple(merged_system),
         )
 
     return struct(
@@ -550,13 +572,14 @@ def _make_sandbox(name, default, fs_rules, net_policy, net_domain_names=None, do
         _fs_rules=fs_rules,
         _net_policy=net_policy,
         _net_domain_names=net_domain_names,
+        _system=system,
         _is_sandbox=True,
         _doc=doc,
         update=_update,
     )
 
 
-def sandbox(name=None, tree=None, default="deny", fs=None, net=None, doc=None):
+def sandbox(name=None, tree=None, default="deny", fs=None, net=None, doc=None, system=None):
     """Register a sandbox from a decision-tree dict, or (legacy) build one.
 
     New form:
@@ -568,17 +591,22 @@ def sandbox(name=None, tree=None, default="deny", fs=None, net=None, doc=None):
 
     Legacy form (still supported until Task A6):
         sandbox("name", default=deny(), fs={...}, net=allow())
+
+    `system` grants opt-in system capabilities beyond fs/net:
+        "power"           power-management notifications (JVM/Bazel servers)
+        "localhost_serve" bind + accept connections on loopback ports
     """
+    system = _validate_system(system)
     # New tree form: positional dict tree, no fs=/net= kwargs.
     if tree != None and type(tree) == "dict" and fs == None and net == None:
         if type(name) != "string":
             fail("sandbox() name must be a string")
-        _sandbox_impl(name, tree, default=_unwrap_effect(default), doc=doc)
+        _sandbox_impl(name, tree, default=_unwrap_effect(default), doc=doc, system=list(system))
         return name
-    return _legacy_sandbox(name, default, fs, net, doc)
+    return _legacy_sandbox(name, default, fs, net, doc, system)
 
 
-def _legacy_sandbox(name=None, default="deny", fs=None, net=None, doc=None):
+def _legacy_sandbox(name=None, default="deny", fs=None, net=None, doc=None, system=()):
     """Legacy builder-based sandbox(). Removed in Task A6.
 
     Usage:
@@ -656,7 +684,7 @@ def _legacy_sandbox(name=None, default="deny", fs=None, net=None, doc=None):
         else:
             fail("sandbox net= must be an effect string or a list of domain entries")
 
-    return _make_sandbox(name, default, fs_rules, net_policy, net_domain_names, doc=doc)
+    return _make_sandbox(name, default, fs_rules, net_policy, net_domain_names, doc=doc, system=system)
 
 
 # ---------------------------------------------------------------------------

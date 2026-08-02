@@ -146,6 +146,99 @@ impl<'de> Deserialize<'de> for Cap {
     }
 }
 
+bitflags::bitflags! {
+    /// Opt-in system capabilities beyond filesystem and network access.
+    ///
+    /// These grant narrow kernel services that some workloads require but
+    /// that default-deny sandboxes block. Each is enforced where the
+    /// platform supports it (macOS Seatbelt) and is a no-op elsewhere
+    /// (Linux Landlock/seccomp does not restrict these services).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct SystemCap: u8 {
+        /// Receive power-management notifications (system sleep/wake).
+        /// Required by JVM-based tools: Bazel's server registers via
+        /// `IORegisterForSystemPower()` at startup and aborts if the call
+        /// fails. On macOS this compiles to an `iokit-open` allowance
+        /// scoped to the power-management user client only.
+        const POWER = 0b0000_0001;
+        /// Bind and accept connections on loopback (localhost) ports.
+        /// Required by tools with a client/server split over localhost
+        /// (Bazel's gRPC server, dev servers under test). Outbound
+        /// loopback access is governed by the network policy; this only
+        /// adds serving.
+        const LOCALHOST_SERVE = 0b0000_0010;
+    }
+}
+
+impl SystemCap {
+    /// Return capabilities as a list of name strings.
+    pub fn to_list(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.contains(SystemCap::POWER) {
+            names.push("power");
+        }
+        if self.contains(SystemCap::LOCALHOST_SERVE) {
+            names.push("localhost_serve");
+        }
+        names
+    }
+
+    /// Parse a single system capability name.
+    pub fn parse_single(s: &str) -> Result<SystemCap, String> {
+        match s {
+            "power" => Ok(SystemCap::POWER),
+            "localhost_serve" => Ok(SystemCap::LOCALHOST_SERVE),
+            other => Err(format!(
+                "unknown system capability: '{}' (expected \"power\" or \"localhost_serve\")",
+                other
+            )),
+        }
+    }
+
+    /// Format capabilities as a human-readable string like "power + localhost_serve".
+    pub fn display(&self) -> String {
+        self.to_list().join(" + ")
+    }
+}
+
+impl Serialize for SystemCap {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let names = self.to_list();
+        let mut seq = serializer.serialize_seq(Some(names.len()))?;
+        for name in &names {
+            seq.serialize_element(name)?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SystemCap {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de;
+
+        struct SystemCapVisitor;
+
+        impl<'de> de::Visitor<'de> for SystemCapVisitor {
+            type Value = SystemCap;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(r#"a list of system capabilities like ["power"]"#)
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<SystemCap, A::Error> {
+                let mut caps = SystemCap::empty();
+                while let Some(name) = seq.next_element::<String>()? {
+                    caps |= SystemCap::parse_single(&name).map_err(de::Error::custom)?;
+                }
+                Ok(caps)
+            }
+        }
+
+        deserializer.deserialize_any(SystemCapVisitor)
+    }
+}
+
 /// A sandbox policy is a list of capability rules applied to paths,
 /// plus a network policy. Platform backends compile this to their
 /// native enforcement (Landlock+seccomp, Seatbelt SBPL, etc.).
@@ -163,6 +256,13 @@ pub struct SandboxPolicy {
     /// Network access policy.
     #[serde(default)]
     pub network: NetworkPolicy,
+
+    /// Opt-in system capabilities (power notifications, loopback serving).
+    #[serde(
+        default = "SystemCap::empty",
+        skip_serializing_if = "SystemCap::is_empty"
+    )]
+    pub system: SystemCap,
 
     /// Optional docstring describing this sandbox's purpose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -676,6 +776,7 @@ mod tests {
                 },
             ],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
 
@@ -736,6 +837,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
 
@@ -744,6 +846,73 @@ mod tests {
         assert_eq!(deserialized.default, policy.default);
         assert_eq!(deserialized.rules.len(), 1);
         assert_eq!(deserialized.network, NetworkPolicy::Deny);
+    }
+
+    #[test]
+    fn test_system_cap_serde_roundtrip() {
+        let caps = SystemCap::POWER | SystemCap::LOCALHOST_SERVE;
+        let json = serde_json::to_string(&caps).unwrap();
+        assert_eq!(json, r#"["power","localhost_serve"]"#);
+        let deserialized: SystemCap = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, caps);
+    }
+
+    #[test]
+    fn test_system_cap_unknown_name_rejected() {
+        let result: Result<SystemCap, _> = serde_json::from_str(r#"["iokit"]"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_system_cap_rejects_bare_string() {
+        // Must be a list; a bare string is a policy authoring mistake and
+        // should fail loudly rather than silently granting nothing.
+        let result: Result<SystemCap, _> = serde_json::from_str(r#""power""#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_system_cap_duplicates_collapse() {
+        let caps: SystemCap = serde_json::from_str(r#"["power","power"]"#).unwrap();
+        assert_eq!(caps, SystemCap::POWER);
+    }
+
+    #[test]
+    fn test_system_cap_empty_list_is_empty() {
+        let caps: SystemCap = serde_json::from_str("[]").unwrap();
+        assert!(caps.is_empty());
+    }
+
+    #[test]
+    fn test_sandbox_policy_rejects_unknown_system_cap() {
+        // A typo must fail policy load rather than being dropped: silently
+        // ignoring it would leave the workload broken with no explanation.
+        let json = r#"{"default":["read"],"rules":[],"network":"deny","system":["powr"]}"#;
+        let result: Result<SandboxPolicy, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unknown system capability"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_sandbox_policy_system_defaults_empty_and_omitted() {
+        // Policies without a "system" field deserialize to empty caps.
+        let json = r#"{"default":["read"],"rules":[],"network":"deny"}"#;
+        let policy: SandboxPolicy = serde_json::from_str(json).unwrap();
+        assert!(policy.system.is_empty());
+
+        // Empty caps are omitted on serialization (wire compat).
+        let out = serde_json::to_string(&policy).unwrap();
+        assert!(!out.contains("system"));
+    }
+
+    #[test]
+    fn test_sandbox_policy_system_roundtrip() {
+        let json = r#"{"default":["read"],"rules":[],"network":"localhost","system":["power"]}"#;
+        let policy: SandboxPolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(policy.system, SystemCap::POWER);
+        let out = serde_json::to_string(&policy).unwrap();
+        assert!(out.contains(r#""system":["power"]"#));
     }
 
     // -----------------------------------------------------------------------
@@ -824,6 +993,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let caps = policy.effective_caps("/project/src/main.rs", "/project");
@@ -847,6 +1017,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         // Exact match
@@ -881,6 +1052,7 @@ mod tests {
                 },
             ],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         // At same depth, allow wins (last-match-wins, matching SBPL semantics)
@@ -919,6 +1091,7 @@ mod tests {
                 },
             ],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         // In /project but outside .git: full caps
@@ -943,6 +1116,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         // Path that matches no rules gets default
@@ -990,6 +1164,7 @@ mod tests {
                 },
             ],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
 
@@ -1023,6 +1198,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         // No follow_worktrees rules → policy unchanged regardless of cwd
@@ -1047,6 +1223,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         // Normal repo (not a worktree) → no expansion
@@ -1095,6 +1272,7 @@ mod tests {
                 },
             ],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
 
@@ -1239,6 +1417,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         // Query via the resolved (real) path should match the symlink rule
@@ -1269,6 +1448,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         // Query via the symlink should match the real-path rule
@@ -1299,6 +1479,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let query = format!("{}/file.txt", real_dir.display());
@@ -1328,6 +1509,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let query = format!("{}/secret", real_dir.display());
@@ -1353,6 +1535,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let caps = policy.effective_caps("/private/var/folders/xx/data", "/ignored");
@@ -1376,6 +1559,7 @@ mod tests {
                 doc: None,
             }],
             network: NetworkPolicy::Deny,
+            system: SystemCap::empty(),
             doc: None,
         };
         let caps = policy.effective_caps("/tmp/scratch", "/ignored");

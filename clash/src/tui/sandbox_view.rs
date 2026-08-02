@@ -553,6 +553,7 @@ mod tests {
                 default: Cap::READ,
                 rules: vec![],
                 network: NetworkPolicy::Deny,
+                system: SystemCap::empty(),
                 doc: None,
             },
         );

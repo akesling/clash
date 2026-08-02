@@ -257,6 +257,19 @@ pub fn sandbox_json_to_expr(name: &str, sb: &serde_json::Value) -> Expr {
         }
     }
 
+    // system capabilities — these must survive the round-trip, or converting a
+    // policy silently strips capabilities its sandboxes depend on.
+    if let Some(system) = sb.get("system").and_then(|v| v.as_array()) {
+        let caps: Vec<Expr> = system
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(Expr::string)
+            .collect();
+        if !caps.is_empty() {
+            kwargs.push(("system", Expr::List(caps)));
+        }
+    }
+
     builder::sandbox(name, kwargs)
 }
 
@@ -375,5 +388,38 @@ policy("test", default = deny(), rules = [])
         assert!(result.contains("when("), "got:\n{result}");
         assert!(result.contains("\"Bash\""), "got:\n{result}");
         assert!(result.contains("\"git\""), "got:\n{result}");
+    }
+
+    #[test]
+    fn sandbox_json_to_expr_preserves_system_caps() {
+        // Converting a policy must not silently strip system capabilities:
+        // a sandbox that loses "power" fails at runtime in a way that looks
+        // like a bug in the sandboxed tool, not a lost policy field.
+        let sb: serde_json::Value = serde_json::from_str(
+            r#"{"default":["execute"],"rules":[],"network":"localhost",
+                "system":["power","localhost_serve"]}"#,
+        )
+        .unwrap();
+
+        let expr = sandbox_json_to_expr("bazel", &sb);
+        let rendered = serialize(&[Stmt::Expr(expr)]);
+
+        assert!(
+            rendered.contains("system"),
+            "system kwarg should survive conversion, got:\n{rendered}"
+        );
+        assert!(rendered.contains("\"power\""), "got:\n{rendered}");
+        assert!(rendered.contains("\"localhost_serve\""), "got:\n{rendered}");
+    }
+
+    #[test]
+    fn sandbox_json_to_expr_omits_empty_system() {
+        let sb: serde_json::Value =
+            serde_json::from_str(r#"{"default":["execute"],"rules":[],"network":"deny"}"#).unwrap();
+        let rendered = serialize(&[Stmt::Expr(sandbox_json_to_expr("plain", &sb))]);
+        assert!(
+            !rendered.contains("system"),
+            "sandboxes without system caps should not gain a system= kwarg, got:\n{rendered}"
+        );
     }
 }

@@ -60,6 +60,9 @@ pub enum SandboxCmd {
         /// Network policy: deny, allow, localhost
         #[arg(long, default_value = "deny")]
         network: String,
+        /// System capability to grant: power, localhost_serve (repeatable)
+        #[arg(long = "system", value_name = "CAP")]
+        system: Vec<String>,
         /// Description of the sandbox
         #[arg(long)]
         doc: Option<String>,
@@ -249,9 +252,10 @@ pub fn run_sandbox(cmd: SandboxCmd) -> Result<()> {
             name,
             default,
             network,
+            system,
             doc,
             scope,
-        } => handle_create(&name, &default, &network, doc, scope),
+        } => handle_create(&name, &default, &network, &system, doc, scope),
         SandboxCmd::Delete { name, scope } => handle_delete(&name, scope),
         SandboxCmd::ListSandboxes { json } => handle_list_sandboxes(json),
         SandboxCmd::AddRule {
@@ -289,9 +293,14 @@ fn handle_create(
     name: &str,
     default: &str,
     network: &str,
+    system: &[String],
     _doc: Option<String>,
     scope: Option<String>,
 ) -> Result<()> {
+    // Reject unknown capability names here rather than writing a policy file
+    // that will fail to load on the next hook invocation.
+    clash_starlark::validate_system_caps(system)?;
+
     let path = require_star_policy(scope)?;
     let mut doc = clash_starlark::codegen::StarDocument::open(&path)?;
 
@@ -302,8 +311,14 @@ fn handle_create(
     };
     let net_allow = network == "allow";
 
-    clash_starlark::codegen::mutate::add_sandbox(&mut doc.stmts, name, default_effect, net_allow)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    clash_starlark::codegen::mutate::add_sandbox(
+        &mut doc.stmts,
+        name,
+        default_effect,
+        net_allow,
+        system,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     doc.save()?;
 
     println!("{} Sandbox '{}' created", style::green_bold("✓"), name);
