@@ -136,10 +136,10 @@ pub fn mine_binaries_from_content(content: &str) -> std::collections::BTreeSet<S
         parse_trace_jsonl(content).unwrap_or_default()
     };
     for inv in &invocations {
-        if inv.tool_name == "Bash" {
-            if let Some(ref bin) = inv.binary {
-                binaries.insert(bin.clone());
-            }
+        if inv.tool_name == "Bash"
+            && let Some(ref bin) = inv.binary
+        {
+            binaries.insert(bin.clone());
         }
     }
     binaries

@@ -191,10 +191,10 @@ fn has_glob_match(dir: &Path, patterns: &[&str]) -> bool {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         for pattern in patterns {
-            if let Some(ext) = pattern.strip_prefix("*.") {
-                if name.ends_with(ext) {
-                    return true;
-                }
+            if let Some(ext) = pattern.strip_prefix("*.")
+                && name.ends_with(ext)
+            {
+                return true;
             }
         }
     }

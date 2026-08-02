@@ -134,14 +134,13 @@ fn comment_match_key(comment: &str) -> Option<&str> {
 /// Returns `(variable_name, stmt_index)` if found.
 fn find_managed_by_key(stmts: &[Stmt], match_key: &str) -> Option<(String, usize)> {
     for (i, stmt) in stmts.iter().enumerate() {
-        if let Stmt::Comment(text) = stmt {
-            if let Some(key) = comment_match_key(text) {
-                if key == match_key {
-                    // The assignment should be right after the comment
-                    if let Some(Stmt::Assign { target, .. }) = stmts.get(i + 1) {
-                        return Some((target.clone(), i + 1));
-                    }
-                }
+        if let Stmt::Comment(text) = stmt
+            && let Some(key) = comment_match_key(text)
+            && key == match_key
+        {
+            // The assignment should be right after the comment
+            if let Some(Stmt::Assign { target, .. }) = stmts.get(i + 1) {
+                return Some((target.clone(), i + 1));
             }
         }
     }
@@ -208,11 +207,11 @@ fn find_managed_section_end(stmts: &mut Vec<Stmt>) -> usize {
     // Look for the last managed assignment
     let mut last_managed_end = None;
     for (i, stmt) in stmts.iter().enumerate() {
-        if let Stmt::Comment(text) = stmt {
-            if text == MANAGED_COMMENT || comment_match_key(text).is_some() {
-                // Track the end: comment + assignment = i + 2
-                last_managed_end = Some(i + 2);
-            }
+        if let Stmt::Comment(text) = stmt
+            && (text == MANAGED_COMMENT || comment_match_key(text).is_some())
+        {
+            // Track the end: comment + assignment = i + 2
+            last_managed_end = Some(i + 2);
         }
     }
 
@@ -234,12 +233,11 @@ fn find_managed_section_end(stmts: &mut Vec<Stmt>) -> usize {
 fn next_managed_var(stmts: &[Stmt]) -> String {
     let mut max_n = -1i64;
     for stmt in stmts {
-        if let Stmt::Assign { target, .. } = stmt {
-            if let Some(rest) = target.strip_prefix(MANAGED_PREFIX) {
-                if let Ok(n) = rest.parse::<i64>() {
-                    max_n = max_n.max(n);
-                }
-            }
+        if let Stmt::Assign { target, .. } = stmt
+            && let Some(rest) = target.strip_prefix(MANAGED_PREFIX)
+            && let Ok(n) = rest.parse::<i64>()
+        {
+            max_n = max_n.max(n);
         }
     }
     format!("{MANAGED_PREFIX}{}", max_n + 1)

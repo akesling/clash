@@ -17,10 +17,10 @@ pub fn standard_loads(sandbox_presets: &[&str], ecosystems: &[&EcosystemDef]) ->
     let mut sandbox_names: Vec<&str> = sandbox_presets.to_vec();
     for eco in ecosystems {
         if eco.star_file == "sandboxes.star" {
-            if let Some(safe) = eco.safe_sandbox {
-                if !sandbox_names.contains(&safe) {
-                    sandbox_names.push(safe);
-                }
+            if let Some(safe) = eco.safe_sandbox
+                && !sandbox_names.contains(&safe)
+            {
+                sandbox_names.push(safe);
             }
             if !sandbox_names.contains(&eco.full_sandbox) {
                 sandbox_names.push(eco.full_sandbox);

@@ -38,15 +38,15 @@ fn init_tracing() {
         .with(filter)
         .with(stderr_layer);
 
-    if let Ok(path) = std::env::var("CLASH_LSP_LOG") {
-        if let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) {
-            let file_layer = fmt::layer()
-                .with_writer(file)
-                .with_ansi(false)
-                .with_target(true);
-            let _ = registry.with(file_layer).try_init();
-            return;
-        }
+    if let Ok(path) = std::env::var("CLASH_LSP_LOG")
+        && let Ok(file) = OpenOptions::new().create(true).append(true).open(&path)
+    {
+        let file_layer = fmt::layer()
+            .with_writer(file)
+            .with_ansi(false)
+            .with_target(true);
+        let _ = registry.with(file_layer).try_init();
+        return;
     }
 
     let _ = registry.try_init();

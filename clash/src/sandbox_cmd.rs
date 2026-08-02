@@ -344,41 +344,41 @@ fn handle_list_sandboxes(json: bool) -> Result<()> {
     let settings = crate::settings::ClashSettings::load_or_create()?;
     let policy = settings.policy_tree();
 
-    if let Some(policy) = policy {
-        if !policy.sandboxes.is_empty() {
-            if json {
-                let output = serde_json::to_string_pretty(&policy.sandboxes)?;
-                println!("{output}");
-            } else {
-                for (name, sb) in &policy.sandboxes {
+    if let Some(policy) = policy
+        && !policy.sandboxes.is_empty()
+    {
+        if json {
+            let output = serde_json::to_string_pretty(&policy.sandboxes)?;
+            println!("{output}");
+        } else {
+            for (name, sb) in &policy.sandboxes {
+                println!(
+                    "{} default={}, network={:?}, {} rules",
+                    style::cyan(name),
+                    sb.default.display(),
+                    sb.network,
+                    sb.rules.len(),
+                );
+                if let Some(ref doc) = sb.doc {
+                    println!("  {}", style::dim(doc));
+                }
+                for rule in &sb.rules {
                     println!(
-                        "{} default={}, network={:?}, {} rules",
-                        style::cyan(name),
-                        sb.default.display(),
-                        sb.network,
-                        sb.rules.len(),
+                        "    {:?} {} in {}{}",
+                        rule.effect,
+                        rule.caps.short(),
+                        rule.path,
+                        match rule.path_match {
+                            PathMatch::Subpath => "",
+                            PathMatch::Literal => " (literal)",
+                            PathMatch::ChildOf => " (child_of)",
+                            PathMatch::Regex => " (regex)",
+                        },
                     );
-                    if let Some(ref doc) = sb.doc {
-                        println!("  {}", style::dim(doc));
-                    }
-                    for rule in &sb.rules {
-                        println!(
-                            "    {:?} {} in {}{}",
-                            rule.effect,
-                            rule.caps.short(),
-                            rule.path,
-                            match rule.path_match {
-                                PathMatch::Subpath => "",
-                                PathMatch::Literal => " (literal)",
-                                PathMatch::ChildOf => " (child_of)",
-                                PathMatch::Regex => " (regex)",
-                            },
-                        );
-                    }
                 }
             }
-            return Ok(());
         }
+        return Ok(());
     }
 
     // Fall back to AST scan — picks up sandboxes not yet referenced by any rule.

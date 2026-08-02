@@ -63,7 +63,7 @@ pub fn compile_multi_level_to_tree(
 
     // Sort by precedence (highest first) for first-match semantics.
     let mut sorted: Vec<(crate::PolicyLevel, &str, &str)> = levels.to_vec();
-    sorted.sort_by(|a, b| b.0.cmp(&a.0));
+    sorted.sort_by_key(|t| std::cmp::Reverse(t.0));
 
     // Start with an empty merged policy using the default from the highest level.
     let first: CompiledPolicy = serde_json::from_str(sorted[0].1)

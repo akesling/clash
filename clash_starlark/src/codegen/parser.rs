@@ -388,27 +388,26 @@ fn convert_dict_entries(source: &str, node: &tree_sitter::Node) -> Vec<DictEntry
 /// Try to extract a `Stmt::Load` from a call expression.
 /// Returns `Some(Stmt::Load { .. })` if the expression is `load("module", "name1", ...)`.
 fn try_extract_load(expr: &Expr) -> Option<Stmt> {
-    if let Expr::Call { func, args, .. } = expr {
-        if let Expr::Ident(name) = func.as_ref() {
-            if name == "load" && !args.is_empty() {
-                if let Expr::String(module) = &args[0] {
-                    let names: Vec<String> = args[1..]
-                        .iter()
-                        .filter_map(|a| {
-                            if let Expr::String(s) = a {
-                                Some(s.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    return Some(Stmt::Load {
-                        module: module.clone(),
-                        names,
-                    });
+    if let Expr::Call { func, args, .. } = expr
+        && let Expr::Ident(name) = func.as_ref()
+        && name == "load"
+        && !args.is_empty()
+        && let Expr::String(module) = &args[0]
+    {
+        let names: Vec<String> = args[1..]
+            .iter()
+            .filter_map(|a| {
+                if let Expr::String(s) = a {
+                    Some(s.clone())
+                } else {
+                    None
                 }
-            }
-        }
+            })
+            .collect();
+        return Some(Stmt::Load {
+            module: module.clone(),
+            names,
+        });
     }
     None
 }

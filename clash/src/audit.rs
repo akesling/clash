@@ -246,6 +246,7 @@ fn upsert_session_index(session_id: &str, metadata: &serde_json::Value) -> std::
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&index_path)?;
 
     // Acquire an exclusive advisory lock — blocks until available.
@@ -278,6 +279,9 @@ fn upsert_session_index(session_id: &str, metadata: &serde_json::Value) -> std::
 ///
 /// Writes to the global audit log (if enabled) and to the session-specific
 /// audit log in the session tempdir (if the directory exists).
+// Each parameter is an independent field of the log record; bundling them into
+// a struct would only move the argument list to the call sites.
+#[allow(clippy::too_many_arguments)]
 #[instrument(level = Level::TRACE, skip(trace, tool_input))]
 pub fn log_decision(
     config: &AuditConfig,

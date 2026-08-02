@@ -178,7 +178,7 @@ fn make_sandbox_hook(
             } else {
                 command_str.clone()
             };
-            eprintln!("{} blocked shell on {}", "\x1b[1;31mclash:\x1b[0m", noun,);
+            eprintln!("\x1b[1;31mclash:\x1b[0m blocked shell on {}", noun,);
             eprintln!(
                 "  clash policy allow {}          # allow this exact command",
                 audit_hash,
@@ -260,10 +260,10 @@ fn make_sandbox_hook(
         new_args.extend(args.iter().cloned());
 
         // Mark that this command is sandboxed so the REPL can detect sandbox failures.
-        if let Ok(mut guard) = last_decision.lock() {
-            if let Some(ref mut d) = *guard {
-                d.sandboxed = true;
-            }
+        if let Ok(mut guard) = last_decision.lock()
+            && let Some(ref mut d) = *guard
+        {
+            d.sandboxed = true;
         }
 
         clash_brush_core::ExternalCommandAction::Replace("sandbox-exec".to_string(), new_args)
@@ -479,10 +479,7 @@ async fn run_interactive(
             .map_err(|e| anyhow::anyhow!("failed to create interactive shell: {e}"))?;
 
     // Startup banner.
-    eprintln!(
-        "{}",
-        "\x1b[2mRun `clash policy allow|deny <id>` to change policy for any command.\x1b[0m"
-    );
+    eprintln!("\x1b[2mRun `clash policy allow|deny <id>` to change policy for any command.\x1b[0m");
 
     interactive
         .start()
@@ -491,12 +488,11 @@ async fn run_interactive(
 
     loop {
         // Reload policy to pick up changes from other terminals.
-        if let Ok(fresh_settings) = ClashSettings::load_or_create() {
-            if let Some(fresh_policy) = fresh_settings.policy_tree() {
-                if let Ok(mut guard) = shared_policy.write() {
-                    *guard = Arc::new(fresh_policy.clone());
-                }
-            }
+        if let Ok(fresh_settings) = ClashSettings::load_or_create()
+            && let Some(fresh_policy) = fresh_settings.policy_tree()
+            && let Ok(mut guard) = shared_policy.write()
+        {
+            *guard = Arc::new(fresh_policy.clone());
         }
 
         // Update prompt based on last decision.
@@ -517,14 +513,12 @@ async fn run_interactive(
                 }
                 // If a sandboxed command failed, flip the indicator to Deny —
                 // the policy allowed it but the sandbox blocked execution.
-                if !result.is_success() {
-                    if let Ok(mut guard) = last_decision.lock() {
-                        if let Some(ref mut d) = *guard {
-                            if d.sandboxed {
-                                d.effect = Effect::Deny;
-                            }
-                        }
-                    }
+                if !result.is_success()
+                    && let Ok(mut guard) = last_decision.lock()
+                    && let Some(ref mut d) = *guard
+                    && d.sandboxed
+                {
+                    d.effect = Effect::Deny;
                 }
             }
             Ok(clash_brush_interactive::InteractiveExecutionResult::Failed(_)) => {}

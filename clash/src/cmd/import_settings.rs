@@ -306,10 +306,10 @@ pub fn run(agent: Option<AgentKind>) -> Result<()> {
     super::init::install_agent_plugin(agent)?;
 
     // Install statusline for Claude
-    if agent == AgentKind::Claude {
-        if let Err(e) = super::statusline::install() {
-            tracing::warn!(error = %e, "Could not install status line");
-        }
+    if agent == AgentKind::Claude
+        && let Err(e) = super::statusline::install()
+    {
+        tracing::warn!(error = %e, "Could not install status line");
     }
 
     // Print next steps

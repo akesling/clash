@@ -62,10 +62,10 @@ pub fn run_no_import(agent: Option<AgentKind>) -> Result<()> {
 
     install_agent_plugin(agent)?;
 
-    if agent == AgentKind::Claude {
-        if let Err(e) = super::statusline::install() {
-            warn!(error = %e, "Could not install status line");
-        }
+    if agent == AgentKind::Claude
+        && let Err(e) = super::statusline::install()
+    {
+        warn!(error = %e, "Could not install status line");
     }
 
     println!();

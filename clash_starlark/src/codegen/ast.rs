@@ -118,23 +118,20 @@ pub trait Transform {
                 ctx.pop();
                 out
             }
-            Expr::Dict(entries) => {
-                let out = Expr::Dict(
-                    entries
-                        .iter()
-                        .map(|e| {
-                            ctx.push(Ancestor::DictKey);
-                            let key = self.walk_expr(&e.key, ctx);
-                            ctx.pop();
-                            ctx.push(Ancestor::DictValue);
-                            let value = self.walk_expr(&e.value, ctx);
-                            ctx.pop();
-                            DictEntry { key, value }
-                        })
-                        .collect(),
-                );
-                out
-            }
+            Expr::Dict(entries) => Expr::Dict(
+                entries
+                    .iter()
+                    .map(|e| {
+                        ctx.push(Ancestor::DictKey);
+                        let key = self.walk_expr(&e.key, ctx);
+                        ctx.pop();
+                        ctx.push(Ancestor::DictValue);
+                        let value = self.walk_expr(&e.value, ctx);
+                        ctx.pop();
+                        DictEntry { key, value }
+                    })
+                    .collect(),
+            ),
             Expr::Call { func, args, kwargs } => {
                 let func_name = match func.as_ref() {
                     Expr::Ident(name) => Some(name.clone()),

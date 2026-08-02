@@ -77,7 +77,7 @@ fn remove_hooks_and_plugin() {
         let hooks_removed = settings
             .hooks
             .as_mut()
-            .map(|h| super::init::uninstall_clash_hooks(h))
+            .map(super::init::uninstall_clash_hooks)
             .unwrap_or(false);
 
         if hooks_removed {
@@ -85,16 +85,15 @@ fn remove_hooks_and_plugin() {
         }
 
         // Clear empty hooks object.
-        if let Some(ref h) = settings.hooks {
-            if h.pre_tool_use.is_none()
-                && h.post_tool_use.is_none()
-                && h.permission_request.is_none()
-                && h.session_start.is_none()
-                && h.stop.is_none()
-                && h.notification.is_none()
-            {
-                settings.hooks = None;
-            }
+        if let Some(ref h) = settings.hooks
+            && h.pre_tool_use.is_none()
+            && h.post_tool_use.is_none()
+            && h.permission_request.is_none()
+            && h.session_start.is_none()
+            && h.stop.is_none()
+            && h.notification.is_none()
+        {
+            settings.hooks = None;
         }
 
         // Remove plugin enabled flag.

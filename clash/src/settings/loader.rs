@@ -402,7 +402,8 @@ impl ClashSettings {
         }
 
         // Re-sort loaded_policies by precedence (highest first).
-        this.loaded_policies.sort_by(|a, b| b.level.cmp(&a.level));
+        this.loaded_policies
+            .sort_by_key(|p| std::cmp::Reverse(p.level));
 
         if level_sources.is_empty() {
             // No policy files found — keep default (no compiled tree).

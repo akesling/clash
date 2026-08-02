@@ -53,6 +53,12 @@ pub struct EvalContext {
     pub shadows: RefCell<Vec<ShadowedRule>>,
 }
 
+impl Default for EvalContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EvalContext {
     pub fn new() -> Self {
         EvalContext {
@@ -151,12 +157,12 @@ impl EvalContext {
         }
 
         // Add harness_defaults only when explicitly set to false (true is the default)
-        if let Some(hd) = settings.as_ref().and_then(|s| s.harness_defaults) {
-            if !hd {
-                doc.as_object_mut()
-                    .unwrap()
-                    .insert("harness_defaults".to_string(), serde_json::json!(false));
-            }
+        if let Some(hd) = settings.as_ref().and_then(|s| s.harness_defaults)
+            && !hd
+        {
+            doc.as_object_mut()
+                .unwrap()
+                .insert("harness_defaults".to_string(), serde_json::json!(false));
         }
 
         Ok(doc)

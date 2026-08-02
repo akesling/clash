@@ -103,7 +103,7 @@ impl PolicySpec {
         // Remove ecosystem-covered binaries from bash_allows.
         analysis.bash_allows.retain(|segs| {
             segs.first()
-                .map_or(true, |bin| !eco_binaries.contains(bin.as_str()))
+                .is_none_or(|bin| !eco_binaries.contains(bin.as_str()))
         });
 
         // Build rules list in order: denies → ecosystems → allows → asks.
@@ -116,7 +116,7 @@ impl PolicySpec {
                 MatchValue::Nested(vec![(path.as_str().into(), MatchValue::Effect(deny()))]),
             )]);
             rules.push(PolicyRule {
-                expr: Expr::commented(&format!("deny {} on {}", tool, path), expr),
+                expr: Expr::commented(format!("deny {} on {}", tool, path), expr),
             });
         }
 
@@ -490,7 +490,7 @@ impl PolicySpec {
 
         // Load statements
         let preset_refs: Vec<&str> = self.sandbox_presets.iter().map(|s| s.as_str()).collect();
-        let eco_refs: Vec<&EcosystemDef> = self.ecosystems.iter().copied().collect();
+        let eco_refs: Vec<&EcosystemDef> = self.ecosystems.to_vec();
         stmts.extend(loads::standard_loads(&preset_refs, &eco_refs));
 
         // Claude compat load
@@ -512,7 +512,7 @@ impl PolicySpec {
         // Settings call
         if self.emit_settings {
             let default_expr = Expr::call(&self.default_effect, vec![]);
-            let sandbox_expr = self.default_sandbox.as_ref().map(|s| Expr::ident(s));
+            let sandbox_expr = self.default_sandbox.as_ref().map(Expr::ident);
             stmts.push(Stmt::Expr(settings(default_expr, sandbox_expr)));
             stmts.push(Stmt::Blank);
         }

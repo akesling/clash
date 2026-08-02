@@ -555,15 +555,15 @@ fn edit_with_validation(path: &Path) -> Result<()> {
         match validate_policy_source(&tmp_path) {
             Ok(new_policy) => {
                 // Show diff if we have both before and after policies
-                if let Some(ref old_policy) = original_policy {
-                    if let Some(diff) = crate::policy::diff::tree_diff(old_policy, &new_policy) {
-                        eprintln!();
-                        eprintln!("  {}:", style::bold("Policy changes"));
-                        for line in diff.lines() {
-                            eprintln!("    {line}");
-                        }
-                        eprintln!();
+                if let Some(ref old_policy) = original_policy
+                    && let Some(diff) = crate::policy::diff::tree_diff(old_policy, &new_policy)
+                {
+                    eprintln!();
+                    eprintln!("  {}:", style::bold("Policy changes"));
+                    for line in diff.lines() {
+                        eprintln!("    {line}");
                     }
+                    eprintln!();
                 }
 
                 // Show rule count summary
@@ -665,7 +665,7 @@ fn apply_mutation(
 ) -> Result<()> {
     let path = resolve_manifest_path(scope)?;
 
-    if !path.extension().is_some_and(|ext| ext == "star") {
+    if path.extension().is_none_or(|ext| ext != "star") {
         return Err(crate::policy_loader::legacy_json_error(&path));
     }
     apply_mutation_star(&path, &command, tool.as_deref(), bin.as_deref(), mutation)
@@ -870,16 +870,16 @@ fn extract_command_from_entry(
     let clean = summary.trim_end_matches("...");
 
     // Try to parse as JSON to extract the command field.
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(clean) {
-        if let Some(cmd) = val.get("command").and_then(|v| v.as_str()) {
-            let parts: Vec<&str> = cmd.split_whitespace().collect();
-            if parts.is_empty() {
-                anyhow::bail!("empty command in audit entry");
-            }
-            let bin = parts[0].to_string();
-            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
-            return Ok((bin, args));
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(clean)
+        && let Some(cmd) = val.get("command").and_then(|v| v.as_str())
+    {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        if parts.is_empty() {
+            anyhow::bail!("empty command in audit entry");
         }
+        let bin = parts[0].to_string();
+        let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+        return Ok((bin, args));
     }
 
     anyhow::bail!(
@@ -951,11 +951,11 @@ fn handle_allow_by_hash(
 
     let path = resolve_manifest_path(scope)?;
 
-    let scope_label = path
-        .to_string_lossy()
-        .contains(".clash/policy")
-        .then_some("project")
-        .unwrap_or("user");
+    let scope_label = if path.to_string_lossy().contains(".clash/policy") {
+        "project"
+    } else {
+        "user"
+    };
 
     eprintln!();
     eprintln!("  Add rule to {} policy:", scope_label);
@@ -988,7 +988,7 @@ fn apply_mutation_by_path(
     rule_args: &[String],
     mutation: PolicyMutation,
 ) -> Result<()> {
-    if !path.extension().is_some_and(|ext| ext == "star") {
+    if path.extension().is_none_or(|ext| ext != "star") {
         return Err(crate::policy_loader::legacy_json_error(path));
     }
     {
@@ -1064,11 +1064,11 @@ fn handle_deny_by_hash(hash: &str, scope: Option<String>, broad: bool, yes: bool
     let scope = scope.or_else(|| Some("user".to_string()));
     let path = resolve_manifest_path(scope)?;
 
-    let scope_label = path
-        .to_string_lossy()
-        .contains(".clash/policy")
-        .then_some("project")
-        .unwrap_or("user");
+    let scope_label = if path.to_string_lossy().contains(".clash/policy") {
+        "project"
+    } else {
+        "user"
+    };
 
     eprintln!();
     eprintln!("  Add rule to {} policy:", scope_label);
@@ -1243,7 +1243,7 @@ fn handle_convert(file: Option<PathBuf>, replace: bool) -> Result<()> {
 fn handle_migrate(scope: Option<String>, yes: bool) -> Result<()> {
     let path = resolve_manifest_path(scope)?;
 
-    if !path.extension().is_some_and(|ext| ext == "star") {
+    if path.extension().is_none_or(|ext| ext != "star") {
         anyhow::bail!(
             "policy file is not .star format: {}\nRun `clash policy convert` first to migrate from JSON.",
             path.display()
@@ -1345,10 +1345,11 @@ fn add_claude_compat_load(stmts: &mut Vec<clash_starlark::codegen::ast::Stmt>) {
 
     // Check if the load already exists
     for stmt in stmts.iter() {
-        if let Stmt::Load { module, names } = stmt {
-            if module == compat_module && names.iter().any(|n| n == "from_claude_settings") {
-                return;
-            }
+        if let Stmt::Load { module, names } = stmt
+            && module == compat_module
+            && names.iter().any(|n| n == "from_claude_settings")
+        {
+            return;
         }
     }
 
@@ -1366,7 +1367,7 @@ fn add_claude_compat_load(stmts: &mut Vec<clash_starlark::codegen::ast::Stmt>) {
 }
 
 /// Wrap the first argument of `policy(name, ...)` in `merge(from_claude_settings(), ...)`.
-fn wrap_policy_with_merge(stmts: &mut Vec<clash_starlark::codegen::ast::Stmt>) {
+fn wrap_policy_with_merge(stmts: &mut [clash_starlark::codegen::ast::Stmt]) {
     use clash_starlark::codegen::ast::{Expr, Stmt};
 
     for stmt in stmts.iter_mut() {

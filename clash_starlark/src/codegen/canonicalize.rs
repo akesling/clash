@@ -55,7 +55,7 @@ impl ast::Transform for SeparateInternalExternalLoads {
             }
         }
         let out = match &self.last {
-            Some(last) => match (is_internal_load(&last), is_internal_load(&current)) {
+            Some(last) => match (is_internal_load(last), is_internal_load(current)) {
                 (true, false) if current.is_load() => {
                     TransformOp::Expand(vec![Stmt::Blank, current.clone()])
                 }

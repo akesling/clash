@@ -65,21 +65,21 @@ pub fn load_starlark_source_for_test(source: &str) -> Result<TestModule> {
     }
     for name in module.names() {
         let n = name.as_str();
-        if let Some(value) = module.get(n) {
-            if let Some(list) = ListRef::from_value(value) {
-                let mut out = Vec::with_capacity(list.len());
-                let mut all_strings = true;
-                for v in list.iter() {
-                    if let Some(s) = v.unpack_str() {
-                        out.push(s.to_string());
-                    } else {
-                        all_strings = false;
-                        break;
-                    }
+        if let Some(value) = module.get(n)
+            && let Some(list) = ListRef::from_value(value)
+        {
+            let mut out = Vec::with_capacity(list.len());
+            let mut all_strings = true;
+            for v in list.iter() {
+                if let Some(s) = v.unpack_str() {
+                    out.push(s.to_string());
+                } else {
+                    all_strings = false;
+                    break;
                 }
-                if all_strings {
-                    string_lists.insert(n.to_string(), out);
-                }
+            }
+            if all_strings {
+                string_lists.insert(n.to_string(), out);
             }
         }
     }

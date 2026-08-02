@@ -234,10 +234,8 @@ fn format_call(func: &Expr, args: &[Expr], kwargs: &[(String, Expr)], depth: usi
     let mut out = format!("{func_str}(\n");
     for a in args {
         // Emit comment line before the item if it's a Commented expression
-        if has_commented_args {
-            if let Expr::Commented { comment, .. } = a {
-                let _ = writeln!(out, "{inner}# {comment}");
-            }
+        if has_commented_args && let Expr::Commented { comment, .. } = a {
+            let _ = writeln!(out, "{inner}# {comment}");
         }
         write_indented_item(&mut out, &format_expr(a, depth + 1), &inner);
         out.push_str(",\n");

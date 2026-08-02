@@ -96,7 +96,7 @@ const MODE_ALIASES: &[ModeAlias] = &[
 /// Given an agent's native permission mode string, return the canonical mode.
 ///
 /// Case-insensitive. Returns the original string unchanged if no mapping exists.
-pub fn resolve_permission_mode<'a>(agent: AgentKind, native_mode: &'a str) -> &'a str {
+pub fn resolve_permission_mode(agent: AgentKind, native_mode: &str) -> &str {
     let lower = native_mode.to_lowercase();
     for alias in MODE_ALIASES {
         for &(a, name) in alias.agent_names {

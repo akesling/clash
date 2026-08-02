@@ -142,14 +142,10 @@ fn children_to_expr(children: &[serde_json::Value]) -> Expr {
                     .unwrap_or_default();
                 let value = children_to_expr(&inner_children);
                 Some(DictEntry::new(key, value))
-            } else if let Some(decision) = child.get("decision") {
-                // Bare decision as a dict entry — shouldn't normally happen
-                Some(DictEntry::new(
-                    Expr::string("*"),
-                    decision_to_effect_expr(decision),
-                ))
             } else {
-                None
+                child.get("decision").map(|decision| {
+                    DictEntry::new(Expr::string("*"), decision_to_effect_expr(decision))
+                })
             }
         })
         .collect();
@@ -164,19 +160,19 @@ fn pattern_to_expr(pattern: &serde_json::Value) -> Expr {
     if let Some(literal) = pattern.get("literal") {
         return value_to_expr(literal);
     }
-    if let Some(any_of) = pattern.get("any_of") {
-        if let Some(arr) = any_of.as_array() {
-            let items: Vec<Expr> = arr.iter().map(pattern_to_expr).collect();
-            if items.len() == 1 {
-                return items.into_iter().next().unwrap();
-            }
-            return Expr::tuple(items);
+    if let Some(any_of) = pattern.get("any_of")
+        && let Some(arr) = any_of.as_array()
+    {
+        let items: Vec<Expr> = arr.iter().map(pattern_to_expr).collect();
+        if items.len() == 1 {
+            return items.into_iter().next().unwrap();
         }
+        return Expr::tuple(items);
     }
-    if let Some(regex) = pattern.get("regex") {
-        if let Some(s) = regex.as_str() {
-            return Expr::call("regex", vec![Expr::string(s)]);
-        }
+    if let Some(regex) = pattern.get("regex")
+        && let Some(s) = regex.as_str()
+    {
+        return Expr::call("regex", vec![Expr::string(s)]);
     }
     if pattern == "wildcard" || pattern.get("wildcard").is_some() {
         return Expr::string("*");
@@ -236,14 +232,14 @@ pub fn sandbox_json_to_expr(name: &str, sb: &serde_json::Value) -> Expr {
     let mut kwargs: Vec<(&str, Expr)> = vec![];
 
     // default caps
-    if let Some(default) = sb.get("default") {
-        if let Some(caps) = default.as_object() {
-            let deny_all = caps.values().all(|v| v == false);
-            if deny_all {
-                kwargs.push(("default", builder::deny()));
-            } else {
-                kwargs.push(("default", builder::allow()));
-            }
+    if let Some(default) = sb.get("default")
+        && let Some(caps) = default.as_object()
+    {
+        let deny_all = caps.values().all(|v| v == false);
+        if deny_all {
+            kwargs.push(("default", builder::deny()));
+        } else {
+            kwargs.push(("default", builder::allow()));
         }
     }
 

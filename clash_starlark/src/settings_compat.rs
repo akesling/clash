@@ -198,7 +198,7 @@ pub fn build_policy_dict<'v>(perms: &PermissionSet, heap: &'v Heap) -> Value<'v>
                 tool_trees
                     .get_mut(tool)
                     .unwrap()
-                    .insert(&[arg.clone()], effect.clone());
+                    .insert(std::slice::from_ref(arg), effect.clone());
             }
             DictEntry::BashCmd {
                 bin,
@@ -258,10 +258,8 @@ pub(crate) fn from_claude_settings_as_dict_inner<'v>(
 
     let mut combined = PermissionSet::new();
 
-    if user {
-        if let Ok(Some(settings)) = manager.read(SettingsLevel::User) {
-            combined = combined.merge(&settings.permissions);
-        }
+    if user && let Ok(Some(settings)) = manager.read(SettingsLevel::User) {
+        combined = combined.merge(&settings.permissions);
     }
 
     if project {

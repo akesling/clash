@@ -53,21 +53,21 @@ pub fn find_sandboxes(stmts: &[Stmt]) -> Vec<(usize, String)> {
                 Stmt::Assign { value, .. } => Some(value),
                 _ => None,
             }?;
-            if let Expr::Call { func, kwargs, .. } = call {
-                if is_ident(func, "sandbox") {
-                    let name = kwargs.iter().find_map(|(k, v)| {
-                        if k == "name" {
-                            if let Expr::String(s) = v {
-                                Some(s.clone())
-                            } else {
-                                None
-                            }
+            if let Expr::Call { func, kwargs, .. } = call
+                && is_ident(func, "sandbox")
+            {
+                let name = kwargs.iter().find_map(|(k, v)| {
+                    if k == "name" {
+                        if let Expr::String(s) = v {
+                            Some(s.clone())
                         } else {
                             None
                         }
-                    })?;
-                    return Some((i, name));
-                }
+                    } else {
+                        None
+                    }
+                })?;
+                return Some((i, name));
             }
             None
         })
@@ -88,10 +88,10 @@ fn find_sandbox_fs_mut<'a>(stmts: &'a mut [Stmt], name: &str) -> Option<&'a mut 
 
     if let Expr::Call { kwargs, .. } = call {
         for (key, value) in kwargs.iter_mut() {
-            if key == "fs" {
-                if let Expr::Dict(entries) = value {
-                    return Some(entries);
-                }
+            if key == "fs"
+                && let Expr::Dict(entries) = value
+            {
+                return Some(entries);
             }
         }
     }
@@ -126,10 +126,10 @@ pub fn policy_rules_mut(stmts: &mut [Stmt]) -> Option<&mut Vec<Expr>> {
     let idx = find_policy_call(stmts)?;
     if let Stmt::Expr(Expr::Call { kwargs, .. }) = &mut stmts[idx] {
         for (key, value) in kwargs.iter_mut() {
-            if key == "rules" {
-                if let Expr::List(items) = value {
-                    return Some(items);
-                }
+            if key == "rules"
+                && let Expr::List(items) = value
+            {
+                return Some(items);
             }
         }
     }
@@ -141,19 +141,16 @@ pub fn policy_rules_mut(stmts: &mut [Stmt]) -> Option<&mut Vec<Expr>> {
 /// the second positional argument.
 pub fn policy_merge_args_mut(stmts: &mut [Stmt]) -> Option<&mut Vec<Expr>> {
     let policy_idx = find_policy_call(stmts)?;
-    if let Stmt::Expr(Expr::Call { args, .. }) = &mut stmts[policy_idx] {
-        if args.len() >= 2 {
-            if let Expr::Call {
-                func,
-                args: merge_args,
-                ..
-            } = &mut args[1]
-            {
-                if matches!(func.as_ref(), Expr::Ident(n) if n == "merge") {
-                    return Some(merge_args);
-                }
-            }
-        }
+    if let Stmt::Expr(Expr::Call { args, .. }) = &mut stmts[policy_idx]
+        && args.len() >= 2
+        && let Expr::Call {
+            func,
+            args: merge_args,
+            ..
+        } = &mut args[1]
+        && matches!(func.as_ref(), Expr::Ident(n) if n == "merge")
+    {
+        return Some(merge_args);
     }
     None
 }
@@ -202,7 +199,7 @@ pub fn add_exec_rule(
 }
 
 /// Add a raw Starlark expression as a rule.
-pub fn add_raw_rule(stmts: &mut Vec<Stmt>, expr_text: &str) -> Result<(), String> {
+pub fn add_raw_rule(stmts: &mut [Stmt], expr_text: &str) -> Result<(), String> {
     append_rule(stmts, Expr::raw(expr_text))
 }
 
@@ -237,38 +234,38 @@ pub fn replace_rule(stmts: &mut [Stmt], rule_index: usize, new_rule: Expr) -> Re
 // ---------------------------------------------------------------------------
 
 /// Set the default effect in the `settings()` call.
-pub fn set_default_effect(stmts: &mut Vec<Stmt>, effect: Effect) -> Result<(), String> {
+pub fn set_default_effect(stmts: &mut [Stmt], effect: Effect) -> Result<(), String> {
     let effect_expr = match effect {
         Effect::Allow => builder::allow(),
         Effect::Deny => builder::deny(),
         Effect::Ask => builder::ask(),
     };
 
-    if let Some(idx) = find_settings_call(stmts) {
-        if let Stmt::Expr(Expr::Call { kwargs, .. }) = &mut stmts[idx] {
-            if let Some((_, val)) = kwargs.iter_mut().find(|(k, _)| k == "default") {
-                *val = effect_expr;
-            } else {
-                kwargs.insert(0, ("default".to_string(), effect_expr));
-            }
-            return Ok(());
+    if let Some(idx) = find_settings_call(stmts)
+        && let Stmt::Expr(Expr::Call { kwargs, .. }) = &mut stmts[idx]
+    {
+        if let Some((_, val)) = kwargs.iter_mut().find(|(k, _)| k == "default") {
+            *val = effect_expr;
+        } else {
+            kwargs.insert(0, ("default".to_string(), effect_expr));
         }
+        return Ok(());
     }
     Err("no settings() call found".to_string())
 }
 
 /// Set or remove the default sandbox in the `settings()` call.
-pub fn set_default_sandbox(stmts: &mut Vec<Stmt>, sandbox: Option<&str>) -> Result<(), String> {
-    if let Some(idx) = find_settings_call(stmts) {
-        if let Stmt::Expr(Expr::Call { kwargs, .. }) = &mut stmts[idx] {
-            // Remove existing default_sandbox kwarg
-            kwargs.retain(|(k, _)| k != "default_sandbox");
-            // Add new one if specified
-            if let Some(name) = sandbox {
-                kwargs.push(("default_sandbox".to_string(), Expr::string(name)));
-            }
-            return Ok(());
+pub fn set_default_sandbox(stmts: &mut [Stmt], sandbox: Option<&str>) -> Result<(), String> {
+    if let Some(idx) = find_settings_call(stmts)
+        && let Stmt::Expr(Expr::Call { kwargs, .. }) = &mut stmts[idx]
+    {
+        // Remove existing default_sandbox kwarg
+        kwargs.retain(|(k, _)| k != "default_sandbox");
+        // Add new one if specified
+        if let Some(name) = sandbox {
+            kwargs.push(("default_sandbox".to_string(), Expr::string(name)));
         }
+        return Ok(());
     }
     Err("no settings() call found".to_string())
 }
@@ -353,7 +350,7 @@ pub fn remove_sandbox(stmts: &mut Vec<Stmt>, name: &str) -> Result<(), String> {
 /// The path should be a glob pattern like `$HOME/.cache/**`.
 /// Caps is a shorthand string like `"read"`, `"read + write"`, or `"rwc"`.
 pub fn add_sandbox_rule(
-    stmts: &mut Vec<Stmt>,
+    stmts: &mut [Stmt],
     sandbox_name: &str,
     path: &str,
     caps: &str,
@@ -383,7 +380,7 @@ pub fn add_sandbox_rule(
 ///
 /// Returns true if a rule was removed.
 pub fn remove_sandbox_rule(
-    stmts: &mut Vec<Stmt>,
+    stmts: &mut [Stmt],
     sandbox_name: &str,
     path: &str,
 ) -> Result<bool, String> {
@@ -393,14 +390,12 @@ pub fn remove_sandbox_rule(
     let before = entries.len();
     entries.retain(|e| {
         // Match glob("path"), subpath("path"), or literal("path") keys
-        if let Expr::Call { func, args, .. } = &e.key {
-            if let Expr::Ident(name) = func.as_ref() {
-                if name == "glob" || name == "subpath" || name == "literal" {
-                    if let Some(Expr::String(p)) = args.first() {
-                        return p != path;
-                    }
-                }
-            }
+        if let Expr::Call { func, args, .. } = &e.key
+            && let Expr::Ident(name) = func.as_ref()
+            && (name == "glob" || name == "subpath" || name == "literal")
+            && let Some(Expr::String(p)) = args.first()
+        {
+            return p != path;
         }
         // Match bare string keys
         if let Expr::String(p) = &e.key {
@@ -446,10 +441,10 @@ pub fn remove_load(stmts: &mut Vec<Stmt>, module: &str) -> Result<(), String> {
 /// If the load statement doesn't exist, creates one.
 pub fn ensure_loaded(stmts: &mut Vec<Stmt>, name: &str) {
     if let Some(idx) = find_std_load(stmts) {
-        if let Stmt::Load { names, .. } = &mut stmts[idx] {
-            if !names.iter().any(|n| n == name) {
-                names.push(name.to_string());
-            }
+        if let Stmt::Load { names, .. } = &mut stmts[idx]
+            && !names.iter().any(|n| n == name)
+        {
+            names.push(name.to_string());
         }
     } else {
         // No std load exists — create one
@@ -458,7 +453,7 @@ pub fn ensure_loaded(stmts: &mut Vec<Stmt>, name: &str) {
 }
 
 /// Append a rule expression to the `policy()` call's `rules = [...]` list.
-fn append_rule(stmts: &mut Vec<Stmt>, rule: Expr) -> Result<(), String> {
+fn append_rule(stmts: &mut [Stmt], rule: Expr) -> Result<(), String> {
     let rules = policy_rules_mut(stmts).ok_or("no policy() call with rules= found")?;
     rules.push(rule);
     Ok(())

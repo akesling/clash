@@ -33,19 +33,16 @@ impl SandboxCollector {
             .flatten()
             .filter(|v| !v.is_none());
 
-        if let Some(sb) = sandbox {
-            if sb.get_type() == "struct" {
-                if let Ok(Some(name_val)) = sb.get_attr("_name", heap) {
-                    if let Some(name) = name_val.unpack_str() {
-                        if self.seen.insert(name.to_string()) {
-                            let sb_json = sandbox_to_json(sb, heap)?;
-                            self.sandboxes.push(sb_json);
-                        }
-                    }
-                }
-            }
-            // String sandbox names are resolved at document assembly time
+        if let Some(sb) = sandbox
+            && sb.get_type() == "struct"
+            && let Ok(Some(name_val)) = sb.get_attr("_name", heap)
+            && let Some(name) = name_val.unpack_str()
+            && self.seen.insert(name.to_string())
+        {
+            let sb_json = sandbox_to_json(sb, heap)?;
+            self.sandboxes.push(sb_json);
         }
+        // String sandbox names are resolved at document assembly time
         Ok(())
     }
 }
@@ -64,7 +61,7 @@ fn effect_to_decision<'v>(effect: Value<'v>, heap: &'v Heap) -> anyhow::Result<M
         .ok()
         .flatten()
         .filter(|v| !v.is_none())
-        .map(|sb| {
+        .and_then(|sb| {
             // If sandbox struct, get name; if string, use directly
             if sb.get_type() == "struct" {
                 sb.get_attr("_name", heap)
@@ -74,8 +71,7 @@ fn effect_to_decision<'v>(effect: Value<'v>, heap: &'v Heap) -> anyhow::Result<M
             } else {
                 sb.unpack_str().map(|s| s.to_string())
             }
-        })
-        .flatten();
+        });
 
     let decision = match kind.as_str() {
         "allow" => json!({"decision": {"allow": sandbox_name}}),
@@ -221,28 +217,27 @@ fn classify_root_key<'v>(key: Value<'v>, heap: &'v Heap) -> anyhow::Result<Match
 #[allow(dead_code)]
 fn classify_nested_key<'v>(key: Value<'v>, heap: &'v Heap) -> anyhow::Result<MatchKeyKind> {
     // Check for typed match key struct (Mode() / Tool() / mode())
-    if key.get_type() == "struct" {
-        if let Ok(Some(mk_val)) = key.get_attr("_match_key", heap) {
-            if let Some(mk) = mk_val.unpack_str() {
-                let match_value = key
-                    .get_attr("_match_value", heap)
-                    .ok()
-                    .flatten()
-                    .context("match key struct missing _match_value")?;
-                let pattern = pattern_to_json(match_value, heap)?;
-                let doc = key
-                    .get_attr("_doc", heap)
-                    .ok()
-                    .flatten()
-                    .filter(|v| !v.is_none())
-                    .and_then(|v| v.unpack_str().map(|s| s.to_string()));
-                return match mk {
-                    "mode" => Ok(MatchKeyKind::Mode { pattern, doc }),
-                    "tool" => Ok(MatchKeyKind::Tool { pattern, doc }),
-                    other => bail!("unknown match key type: {other}"),
-                };
-            }
-        }
+    if key.get_type() == "struct"
+        && let Ok(Some(mk_val)) = key.get_attr("_match_key", heap)
+        && let Some(mk) = mk_val.unpack_str()
+    {
+        let match_value = key
+            .get_attr("_match_value", heap)
+            .ok()
+            .flatten()
+            .context("match key struct missing _match_value")?;
+        let pattern = pattern_to_json(match_value, heap)?;
+        let doc = key
+            .get_attr("_doc", heap)
+            .ok()
+            .flatten()
+            .filter(|v| !v.is_none())
+            .and_then(|v| v.unpack_str().map(|s| s.to_string()));
+        return match mk {
+            "mode" => Ok(MatchKeyKind::Mode { pattern, doc }),
+            "tool" => Ok(MatchKeyKind::Tool { pattern, doc }),
+            other => bail!("unknown match key type: {other}"),
+        };
     }
 
     // Raw string or None = tool name
@@ -399,31 +394,28 @@ pub fn policy_impl<'v>(
     let mut default_override: Option<String> = None;
 
     // Dict form
-    if !rules_or_dict.is_none() {
-        if let Some(dict) = DictRef::from_value(rules_or_dict) {
-            process_policy_dict(
-                &dict,
-                heap,
-                &source,
-                &mut flat_nodes,
-                &mut collector,
-                &mut default_override,
-            )?;
-        }
+    if !rules_or_dict.is_none()
+        && let Some(dict) = DictRef::from_value(rules_or_dict)
+    {
+        process_policy_dict(
+            &dict,
+            heap,
+            &source,
+            &mut flat_nodes,
+            &mut collector,
+            &mut default_override,
+        )?;
     }
 
     // default_sandbox
-    if !default_sandbox.is_none() {
-        if default_sandbox.get_type() == "struct" {
-            if let Ok(Some(name_val)) = default_sandbox.get_attr("_name", heap) {
-                if let Some(sb_name) = name_val.unpack_str() {
-                    if collector.seen.insert(sb_name.to_string()) {
-                        let sb_json = sandbox_to_json(default_sandbox, heap)?;
-                        collector.sandboxes.push(sb_json);
-                    }
-                }
-            }
-        }
+    if !default_sandbox.is_none()
+        && default_sandbox.get_type() == "struct"
+        && let Ok(Some(name_val)) = default_sandbox.get_attr("_name", heap)
+        && let Some(sb_name) = name_val.unpack_str()
+        && collector.seen.insert(sb_name.to_string())
+    {
+        let sb_json = sandbox_to_json(default_sandbox, heap)?;
+        collector.sandboxes.push(sb_json);
     }
 
     Ok((default_override, flat_nodes, collector.sandboxes))
@@ -729,14 +721,12 @@ pub fn sandbox_tree_impl<'v>(
                             .filter_map(|item| item.unpack_i32().map(|n| n as i64))
                             .collect::<Vec<_>>(),
                     )
-                } else if let Some(tup) = starlark::values::tuple::TupleRef::from_value(v) {
-                    Some(
+                } else {
+                    starlark::values::tuple::TupleRef::from_value(v).map(|tup| {
                         tup.iter()
                             .filter_map(|item| item.unpack_i32().map(|n| n as i64))
-                            .collect::<Vec<_>>(),
-                    )
-                } else {
-                    None
+                            .collect::<Vec<_>>()
+                    })
                 }
             })
             .unwrap_or_default();
@@ -839,12 +829,12 @@ pub fn sandbox_to_json<'v>(sb: Value<'v>, heap: &'v Heap) -> anyhow::Result<Json
 
     // FS rules
     let mut rules = Vec::new();
-    if let Ok(Some(fs_rules_val)) = sb.get_attr("_fs_rules", heap) {
-        if let Some(fs_list) = ListRef::from_value(fs_rules_val) {
-            for rule_item in fs_list.iter() {
-                let rule_json = convert_fs_rule(rule_item, heap)?;
-                rules.push(rule_json);
-            }
+    if let Ok(Some(fs_rules_val)) = sb.get_attr("_fs_rules", heap)
+        && let Some(fs_list) = ListRef::from_value(fs_rules_val)
+    {
+        for rule_item in fs_list.iter() {
+            let rule_json = convert_fs_rule(rule_item, heap)?;
+            rules.push(rule_json);
         }
     }
 
@@ -925,23 +915,23 @@ fn convert_fs_rule<'v>(rule: Value<'v>, heap: &'v Heap) -> anyhow::Result<JsonVa
     });
 
     // Optional follow_worktrees
-    if let Some(fw) = dict_get("follow_worktrees") {
-        if fw.unpack_bool() == Some(true) {
-            rule_json
-                .as_object_mut()
-                .unwrap()
-                .insert("follow_worktrees".to_string(), json!(true));
-        }
+    if let Some(fw) = dict_get("follow_worktrees")
+        && fw.unpack_bool() == Some(true)
+    {
+        rule_json
+            .as_object_mut()
+            .unwrap()
+            .insert("follow_worktrees".to_string(), json!(true));
     }
 
     // Optional doc
-    if let Some(doc) = dict_get("doc") {
-        if let Some(s) = doc.unpack_str() {
-            rule_json
-                .as_object_mut()
-                .unwrap()
-                .insert("doc".to_string(), json!(s));
-        }
+    if let Some(doc) = dict_get("doc")
+        && let Some(s) = doc.unpack_str()
+    {
+        rule_json
+            .as_object_mut()
+            .unwrap()
+            .insert("doc".to_string(), json!(s));
     }
 
     Ok(rule_json)
@@ -959,23 +949,20 @@ fn convert_net_policy<'v>(sb: Value<'v>, heap: &'v Heap) -> anyhow::Result<JsonV
             let dict = DictRef::from_value(v).unwrap();
             let key = heap.alloc_str("_localhost_ports");
             if let Ok(Some(ports_val)) = dict.get(key.to_value()) {
-                let ports_iter: Option<Vec<u16>> = if let Some(list) =
-                    ListRef::from_value(ports_val)
-                {
-                    Some(
-                        list.iter()
-                            .filter_map(|item| item.unpack_i32().map(|n| n as u16))
-                            .collect(),
-                    )
-                } else if let Some(tup) = starlark::values::tuple::TupleRef::from_value(ports_val) {
-                    Some(
-                        tup.iter()
-                            .filter_map(|item| item.unpack_i32().map(|n| n as u16))
-                            .collect(),
-                    )
-                } else {
-                    None
-                };
+                let ports_iter: Option<Vec<u16>> =
+                    if let Some(list) = ListRef::from_value(ports_val) {
+                        Some(
+                            list.iter()
+                                .filter_map(|item| item.unpack_i32().map(|n| n as u16))
+                                .collect(),
+                        )
+                    } else {
+                        starlark::values::tuple::TupleRef::from_value(ports_val).map(|tup| {
+                            tup.iter()
+                                .filter_map(|item| item.unpack_i32().map(|n| n as u16))
+                                .collect()
+                        })
+                    };
                 if let Some(ports) = ports_iter {
                     if ports.is_empty() {
                         return Ok(json!("localhost"));
@@ -1016,17 +1003,17 @@ fn resolve_path_value<'v>(pv: Value<'v>, heap: &'v Heap) -> anyhow::Result<Strin
         return Ok(s.to_string());
     }
     if pv.get_type() == "struct" {
-        if let Ok(Some(env_val)) = pv.get_attr("_env", heap) {
-            if let Some(env_name) = env_val.unpack_str() {
-                return Ok(format!("${env_name}"));
-            }
+        if let Ok(Some(env_val)) = pv.get_attr("_env", heap)
+            && let Some(env_name) = env_val.unpack_str()
+        {
+            return Ok(format!("${env_name}"));
         }
-        if let Ok(Some(join_val)) = pv.get_attr("_join", heap) {
-            if let Some(list) = ListRef::from_value(join_val) {
-                let parts: Result<Vec<_>, _> =
-                    list.iter().map(|v| resolve_path_value(v, heap)).collect();
-                return Ok(parts?.join("/"));
-            }
+        if let Ok(Some(join_val)) = pv.get_attr("_join", heap)
+            && let Some(list) = ListRef::from_value(join_val)
+        {
+            let parts: Result<Vec<_>, _> =
+                list.iter().map(|v| resolve_path_value(v, heap)).collect();
+            return Ok(parts?.join("/"));
         }
     }
     Ok(pv.to_str())
