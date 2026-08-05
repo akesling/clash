@@ -109,6 +109,10 @@ const SHELL_BUILTINS: &[&str] = &[
 fn make_sandbox_hook(
     shared_policy: SharedPolicy,
     default_sandbox: Option<SandboxPolicy>,
+    proxy: Option<(
+        std::net::SocketAddr,
+        crate::policy::sandbox_types::NetworkPolicy,
+    )>,
     debug: bool,
     audit_config: crate::audit::AuditConfig,
     session_id: String,
@@ -251,12 +255,24 @@ fn make_sandbox_hook(
             }
         };
 
-        let mut new_args = vec![
-            "-p".to_string(),
-            profile,
-            "--".to_string(),
-            executable_path.to_string(),
-        ];
+        let mut new_args = vec!["-p".to_string(), profile, "--".to_string()];
+
+        // Advertise the domain-filtering proxy only to commands whose own
+        // sandbox has exactly the network policy that proxy was built for.
+        // Exporting it into the shell environment instead would let any
+        // command able to reach loopback borrow this proxy — and with it, a
+        // different sandbox's domain allowlist.
+        if let Some((addr, ref proxy_net)) = proxy
+            && resolved.network == *proxy_net
+        {
+            let url = format!("http://{}", addr);
+            new_args.push("/usr/bin/env".to_string());
+            for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+                new_args.push(format!("{key}={url}"));
+            }
+        }
+
+        new_args.push(executable_path.to_string());
         new_args.extend(args.iter().cloned());
 
         // Mark that this command is sandboxed so the REPL can detect sandbox failures.
@@ -305,6 +321,22 @@ pub fn run_shell(
         None => None,
     };
 
+    // Domain filtering is enforced by a local proxy: the compiled profile
+    // permits loopback only, and traffic is expected to leave through that
+    // proxy. `clash sandbox exec` starts it; this path must too, or every
+    // outbound request from a domain-filtered sandbox fails against a proxy
+    // that was never started. The handle must outlive every command the shell
+    // runs, so it stays bound for the rest of `run_shell`.
+    let _proxy_handle = match default_sandbox.as_ref() {
+        Some(sbx) => crate::sandbox::maybe_start_proxy(&sbx.network)
+            .context("failed to start domain-filtering proxy")?,
+        None => None,
+    };
+    let proxy_for_hook = _proxy_handle
+        .as_ref()
+        .zip(default_sandbox.as_ref())
+        .map(|(h, sbx)| (h.addr, sbx.network.clone()));
+
     // Create a shell session for audit logging.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -322,6 +354,7 @@ pub fn run_shell(
     let hook = make_sandbox_hook(
         shared_policy.clone(),
         default_sandbox,
+        proxy_for_hook,
         debug,
         settings.audit.clone(),
         session_id,
@@ -597,6 +630,7 @@ mod tests {
         make_sandbox_hook(
             shared_policy,
             None,
+            None,
             false,
             crate::audit::AuditConfig::default(),
             "test-session".to_string(),
@@ -675,6 +709,7 @@ mod tests {
         let hook = make_sandbox_hook(
             shared_policy,
             None,
+            None,
             false,
             crate::audit::AuditConfig::default(),
             "test-no-sandbox".to_string(),
@@ -704,6 +739,7 @@ mod tests {
         let shared_policy: SharedPolicy = Arc::new(std::sync::RwLock::new(policy));
         let hook = make_sandbox_hook(
             shared_policy,
+            None,
             None,
             false,
             crate::audit::AuditConfig::default(),

@@ -1,0 +1,48 @@
+meta:
+  name: shell path starts the domain-filtering proxy
+  description: >
+    `clash shell -c` is what the PreToolUse hook rewrites agent Bash commands
+    into. A domain-filtered sandbox compiles to "loopback only" and expects
+    traffic to leave through a local proxy, so this path must start that proxy
+    and export HTTP_PROXY. Without it the profile points at a proxy that was
+    never started and every outbound request fails — while `clash sandbox exec`
+    keeps working, which is exactly what made this hard to notice.
+
+clash:
+  policy_star: |
+    load("@clash//std.star", "allow", "deny", "ask", "sandbox", "policy", "settings", "domains", "tool")
+
+    filtered = sandbox(
+        name = "filtered",
+        default = ask(),
+        fs = {"$PWD": allow("rwc")},
+        net = domains({"example.com": allow()}),
+    )
+
+    unfiltered = sandbox(
+        name = "unfiltered",
+        default = ask(),
+        fs = {"$PWD": allow("rwc")},
+    )
+
+    settings(default = deny())
+    policy("test", {tool("Bash"): allow(sandbox = filtered)})
+
+steps:
+  - name: a domain-filtered sandbox exports HTTP_PROXY to the command
+    command: shell --sandbox filtered -c "env | grep -i '^http_proxy='"
+    expect:
+      exit_code: 0
+      stdout_contains: "http_proxy=http://127.0.0.1:"
+
+  - name: the uppercase spelling is exported too
+    command: shell --sandbox filtered -c "env | grep '^HTTPS_PROXY='"
+    expect:
+      exit_code: 0
+      stdout_contains: "HTTPS_PROXY=http://127.0.0.1:"
+
+  - name: a sandbox with no domain filtering starts no proxy
+    command: shell --sandbox unfiltered -c "env | grep -c -i '^http_proxy=' || true"
+    expect:
+      not:
+        stdout_contains: "http_proxy=http://127.0.0.1:"

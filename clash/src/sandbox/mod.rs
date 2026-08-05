@@ -251,7 +251,9 @@ pub fn spawn_sandboxed_shell(
 
 /// Start a domain-filtering proxy if the network policy is `AllowDomains`.
 /// Returns `None` for `Deny` or `Allow` (no proxy needed).
-fn maybe_start_proxy(network: &NetworkPolicy) -> Result<Option<proxy::ProxyHandle>, SandboxError> {
+pub(crate) fn maybe_start_proxy(
+    network: &NetworkPolicy,
+) -> Result<Option<proxy::ProxyHandle>, SandboxError> {
     match network {
         NetworkPolicy::AllowDomains(domains) => {
             let config = proxy::ProxyConfig {

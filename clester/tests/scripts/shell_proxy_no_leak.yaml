@@ -1,0 +1,64 @@
+meta:
+  name: proxy env must not leak reachable network to stricter sandboxes
+  description: >
+    The shell exports HTTP_PROXY into its own environment, so every command it
+    runs inherits it — including commands whose per-command sandbox differs
+    from the shell's default. The sharp case is a loopback-only sandbox: it can
+    physically reach 127.0.0.1, so it can reach the proxy, and the proxy holds
+    the *default* sandbox's allowlist. If that combination works, a stricter
+    sandbox has borrowed a looser one's network reach.
+
+clash:
+  policy_star: |
+    load("@clash//std.star", "allow", "deny", "ask", "sandbox", "policy", "settings", "domains", "localhost", "tool", "glob")
+
+    # Default for the shell: domain-filtered, so a proxy gets started.
+    filtered = sandbox(
+        name = "filtered",
+        default = ask(),
+        fs = {"$PWD": allow("rwc")},
+        net = domains({"example.com": allow()}),
+    )
+
+    # Loopback-only: CAN reach 127.0.0.1, so it can physically reach the proxy.
+    loopback = sandbox(
+        name = "loopback",
+        default = ask(),
+        fs = {"$PWD": allow("rwc")},
+        net = localhost(),
+    )
+
+    settings(default = deny())
+    policy("test", {
+        tool("Bash"): {
+            "curl": {glob("**"): allow(sandbox = loopback)},
+            glob("**"): allow(sandbox = filtered),
+        },
+    })
+
+steps:
+  - name: the proxy is started and advertised for the shell
+    command: shell --sandbox filtered -c "env | grep -i '^http_proxy='"
+    expect:
+      exit_code: 0
+      stdout_contains: "http_proxy=http://127.0.0.1:"
+
+  # Liveness guard: if curl were missing or the sandbox blocked exec, the
+  # reachability step below would pass for the wrong reason.
+  - name: curl actually runs under the loopback sandbox
+    command: shell --sandbox filtered -c "curl --version"
+    expect:
+      exit_code: 0
+      stdout_contains: "curl"
+
+  - name: the loopback sandbox is never handed the proxy address
+    command: shell --sandbox filtered -c "curl -sS -o /dev/null -w 'code:%{http_code}' --max-time 10 http://example.com; env | grep -c -i '^http_proxy=' || true"
+    expect:
+      not:
+        stdout_contains: "code:200"
+
+  - name: a loopback-only sandbox must not borrow the shell proxy to reach the internet
+    command: shell --sandbox filtered -c "curl -sS -o /dev/null -w 'code:%{http_code}' --max-time 10 http://example.com"
+    expect:
+      not:
+        stdout_contains: "code:200"
