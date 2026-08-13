@@ -179,3 +179,85 @@ sandbox("bad", {default(): deny()}, system=["iokit"])
         "expected validation error, got: {msg}"
     );
 }
+
+#[test]
+fn sandbox_tree_env_controls_round_trip() {
+    let ctx = eval_policy_source_for_test(
+        r#"
+sandbox("boxed", {
+    default(): deny(),
+    path("$PWD"): allow("rwc"),
+}, env = {"FOO": "bar", "SECRET": deny()})
+"#,
+    )
+    .unwrap();
+    let sandboxes = ctx.sandboxes.borrow();
+    let sb = sandboxes.get("boxed").expect("registered");
+    assert_eq!(sb["env"]["set"]["FOO"], "bar", "got {:?}", sb["env"]);
+    assert_eq!(sb["env"]["remove"], serde_json::json!(["SECRET"]));
+}
+
+#[test]
+fn sandbox_legacy_env_controls_round_trip() {
+    let ctx = eval_policy_source_for_test(
+        r#"
+boxed = sandbox(
+    name = "legacy-env",
+    default = ask(),
+    fs = {"$PWD": allow("rwc")},
+    env = {"FOO": "bar", "SECRET": deny()},
+)
+policy("p", {tool("Bash"): allow(sandbox = boxed)})
+"#,
+    )
+    .unwrap();
+    let doc = ctx.assemble_document().unwrap();
+    let sb = &doc["sandboxes"]["legacy-env"];
+    assert_eq!(sb["env"]["set"]["FOO"], "bar", "got {:?}", sb["env"]);
+    assert_eq!(sb["env"]["remove"], serde_json::json!(["SECRET"]));
+}
+
+#[test]
+fn sandbox_env_clean_mode_round_trip() {
+    let ctx = eval_policy_source_for_test(
+        r#"
+sandbox("clean", {
+    default(): deny(),
+    path("$PWD"): allow("rwc"),
+}, env = {
+    default(): deny(),
+    "PATH": allow(),
+    "CARGO_HOME": "$HOME/.sbx/cargo",
+})
+"#,
+    )
+    .unwrap();
+    let sandboxes = ctx.sandboxes.borrow();
+    let sb = sandboxes.get("clean").expect("registered");
+    assert_eq!(sb["env"]["default"], "clean");
+    assert_eq!(sb["env"]["inherit"], serde_json::json!(["PATH"]));
+    assert_eq!(sb["env"]["set"]["CARGO_HOME"], "$HOME/.sbx/cargo");
+}
+
+#[test]
+fn sandbox_env_inherit_is_the_default_and_omitted() {
+    let ctx =
+        eval_policy_source_for_test(r#"sandbox("d", {default(): deny()}, env = {"X": deny()})"#)
+            .unwrap();
+    let sandboxes = ctx.sandboxes.borrow();
+    let sb = sandboxes.get("d").expect("registered");
+    assert!(sb["env"].get("default").is_none(), "inherit is the default");
+    assert_eq!(sb["env"]["remove"], serde_json::json!(["X"]));
+}
+
+#[test]
+fn sandbox_env_passthrough_without_clean_is_rejected() {
+    // allow() only means something once the environment is cleared; silently
+    // ignoring it would make a policy look like it did something it did not.
+    let err = eval_policy_source_for_test(
+        r#"sandbox("d", {default(): deny()}, env = {"PATH": allow()})"#,
+    )
+    .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("default(): deny()"), "got: {msg}");
+}

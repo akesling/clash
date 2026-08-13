@@ -495,6 +495,37 @@ pub fn validate_system_caps(system: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Build the JSON `env` field, or `Null` when nothing would change.
+fn build_env_json(
+    default_mode: &str,
+    inherit: Vec<String>,
+    set: Vec<(String, String)>,
+    remove: Vec<String>,
+) -> JsonValue {
+    let clean = default_mode == "clean";
+    if !clean && inherit.is_empty() && set.is_empty() && remove.is_empty() {
+        return JsonValue::Null;
+    }
+    let mut obj = serde_json::Map::new();
+    if clean {
+        obj.insert("default".to_string(), json!("clean"));
+    }
+    if !inherit.is_empty() {
+        obj.insert("inherit".to_string(), json!(inherit));
+    }
+    if !set.is_empty() {
+        let mut m = serde_json::Map::new();
+        for (k, v) in set {
+            m.insert(k, json!(v));
+        }
+        obj.insert("set".to_string(), JsonValue::Object(m));
+    }
+    if !remove.is_empty() {
+        obj.insert("remove".to_string(), json!(remove));
+    }
+    JsonValue::Object(obj)
+}
+
 /// Shared assembly: build the sandbox JSON from already-converted parts.
 /// Both the legacy struct path (`sandbox_to_json`) and the new tree path
 /// (`sandbox_tree_impl`) feed this function so the wire format stays in sync.
@@ -504,6 +535,7 @@ fn build_sandbox_json(
     rules: Vec<JsonValue>,
     network: JsonValue,
     system: Vec<String>,
+    env: JsonValue,
     doc: Option<String>,
 ) -> JsonValue {
     let default_caps = if default_effect == "deny" {
@@ -522,6 +554,12 @@ fn build_sandbox_json(
             .as_object_mut()
             .unwrap()
             .insert("system".to_string(), json!(system));
+    }
+    if !env.is_null() {
+        result
+            .as_object_mut()
+            .unwrap()
+            .insert("env".to_string(), env);
     }
     if let Some(d) = doc {
         result
@@ -683,16 +721,35 @@ fn build_network_json(
     JsonValue::Object(obj)
 }
 
+/// Non-tree inputs to `sandbox()`: everything declared as a kwarg rather than
+/// as a key in the decision tree.
+#[derive(Default)]
+pub struct SandboxExtras {
+    pub system: Vec<String>,
+    pub env_default: String,
+    pub env_inherit: Vec<String>,
+    pub env_set: Vec<(String, String)>,
+    pub env_remove: Vec<String>,
+    pub doc: Option<String>,
+}
+
 /// Process a unified sandbox-tree dict into a complete sandbox JSON value.
 pub fn sandbox_tree_impl<'v>(
     name: &str,
     tree: Value<'v>,
     default_effect_kwarg: &str,
-    system: Vec<String>,
-    doc: Option<String>,
+    extras: SandboxExtras,
     heap: &'v Heap,
     _source: Option<String>,
 ) -> anyhow::Result<JsonValue> {
+    let SandboxExtras {
+        system,
+        env_default,
+        env_inherit,
+        env_set,
+        env_remove,
+        doc,
+    } = extras;
     validate_system_caps(&system)?;
     let dict = DictRef::from_value(tree)
         .ok_or_else(|| anyhow::anyhow!("sandbox() tree must be a dict"))?;
@@ -807,6 +864,7 @@ pub fn sandbox_tree_impl<'v>(
         fs_rules,
         network,
         system,
+        build_env_json(&env_default, env_inherit, env_set, env_remove),
         doc,
     ))
 }
@@ -860,6 +918,56 @@ pub fn sandbox_to_json<'v>(sb: Value<'v>, heap: &'v Heap) -> anyhow::Result<Json
     }
     validate_system_caps(&system)?;
 
+    // Environment manipulation (optional `_env_set` dict / `_env_remove` seq).
+    let mut env_set: Vec<(String, String)> = Vec::new();
+    if let Ok(Some(v)) = sb.get_attr("_env_set", heap)
+        && let Some(dict) = DictRef::from_value(v)
+    {
+        for (k, val) in dict.iter() {
+            if let (Some(k), Some(val)) = (k.unpack_str(), val.unpack_str()) {
+                env_set.push((k.to_string(), val.to_string()));
+            }
+        }
+    }
+    let env_default_mode = sb
+        .get_attr("_env_default", heap)
+        .ok()
+        .flatten()
+        .and_then(|v| v.unpack_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "inherit".to_string());
+    let mut env_inherit: Vec<String> = Vec::new();
+    if let Ok(Some(v)) = sb.get_attr("_env_inherit", heap) {
+        if let Some(tup) = starlark::values::tuple::TupleRef::from_value(v) {
+            for item in tup.iter() {
+                if let Some(sv) = item.unpack_str() {
+                    env_inherit.push(sv.to_string());
+                }
+            }
+        } else if let Some(list) = ListRef::from_value(v) {
+            for item in list.iter() {
+                if let Some(sv) = item.unpack_str() {
+                    env_inherit.push(sv.to_string());
+                }
+            }
+        }
+    }
+    let mut env_remove: Vec<String> = Vec::new();
+    if let Ok(Some(v)) = sb.get_attr("_env_remove", heap) {
+        if let Some(tup) = starlark::values::tuple::TupleRef::from_value(v) {
+            for item in tup.iter() {
+                if let Some(sv) = item.unpack_str() {
+                    env_remove.push(sv.to_string());
+                }
+            }
+        } else if let Some(list) = ListRef::from_value(v) {
+            for item in list.iter() {
+                if let Some(sv) = item.unpack_str() {
+                    env_remove.push(sv.to_string());
+                }
+            }
+        }
+    }
+
     let doc = sb
         .get_attr("_doc", heap)
         .ok()
@@ -872,6 +980,7 @@ pub fn sandbox_to_json<'v>(sb: Value<'v>, heap: &'v Heap) -> anyhow::Result<Json
         rules,
         net,
         system,
+        build_env_json(&env_default_mode, env_inherit, env_set, env_remove),
         doc,
     ))
 }

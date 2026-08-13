@@ -45,6 +45,26 @@ fn unpack_string_seq(value: Value, what: &str) -> anyhow::Result<Vec<String>> {
     Ok(out)
 }
 
+/// Unpack a Starlark value that should be `None` or a dict of string->string.
+fn unpack_string_map(value: Value, what: &str) -> anyhow::Result<Vec<(String, String)>> {
+    if value.is_none() {
+        return Ok(Vec::new());
+    }
+    let dict = DictRef::from_value(value)
+        .ok_or_else(|| anyhow::anyhow!("{what} must be a dict, got {}", value.get_type()))?;
+    let mut out = Vec::new();
+    for (k, v) in dict.iter() {
+        let key = k
+            .unpack_str()
+            .ok_or_else(|| anyhow::anyhow!("{what} names must be strings"))?;
+        let val = v
+            .unpack_str()
+            .ok_or_else(|| anyhow::anyhow!("{what} values must be strings"))?;
+        out.push((key.to_string(), val.to_string()));
+    }
+    Ok(out)
+}
+
 fn caller_source_location(eval: &Evaluator) -> Option<String> {
     let stack = eval.call_stack();
     for frame in &stack.frames {
@@ -121,6 +141,7 @@ fn deep_merge<'v>(
     Ok(heap.alloc(AllocDict(entries)))
 }
 
+#[allow(clippy::too_many_arguments)] // starlark kwargs must be separate params
 #[starlark_module]
 fn register_globals(builder: &mut GlobalsBuilder) {
     // Effect constants (internal — callable versions are in std.star)
@@ -313,6 +334,14 @@ fn register_globals(builder: &mut GlobalsBuilder) {
         #[starlark(require = named, default = "deny")] default: &str,
         #[starlark(require = named, default = starlark::values::none::NoneType)] doc: Value<'v>,
         #[starlark(require = named, default = starlark::values::none::NoneType)] system: Value<'v>,
+        #[starlark(require = named, default = "inherit")] env_default: &str,
+        #[starlark(require = named, default = starlark::values::none::NoneType)] env_inherit: Value<
+            'v,
+        >,
+        #[starlark(require = named, default = starlark::values::none::NoneType)] env_set: Value<'v>,
+        #[starlark(require = named, default = starlark::values::none::NoneType)] env_remove: Value<
+            'v,
+        >,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let heap = eval.heap();
@@ -326,13 +355,21 @@ fn register_globals(builder: &mut GlobalsBuilder) {
             })?;
         let doc_str = doc.unpack_str().map(|s| s.to_string());
         let system_caps = unpack_string_seq(system, "sandbox() system=")?;
+        let env_set_map = unpack_string_map(env_set, "sandbox() env=")?;
+        let env_remove_list = unpack_string_seq(env_remove, "sandbox() env=")?;
         let source = caller_source_location(eval);
         let sb_json = crate::when::sandbox_tree_impl(
             name,
             tree,
             default,
-            system_caps,
-            doc_str,
+            crate::when::SandboxExtras {
+                system: system_caps,
+                env_default: env_default.to_string(),
+                env_inherit: unpack_string_seq(env_inherit, "sandbox() env=")?,
+                env_set: env_set_map,
+                env_remove: env_remove_list,
+                doc: doc_str,
+            },
             heap,
             source,
         )?;

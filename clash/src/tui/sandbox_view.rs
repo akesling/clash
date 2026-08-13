@@ -554,6 +554,7 @@ mod tests {
                 rules: vec![],
                 network: NetworkPolicy::Deny,
                 system: SystemCap::empty(),
+                env: Default::default(),
                 doc: None,
             },
         );

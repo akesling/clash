@@ -537,6 +537,10 @@ fn spawn_and_capture_macos(
             .env("https_proxy", &proxy_url);
     }
 
+    // Policy-declared environment is applied last so it wins over the proxy
+    // plumbing above — a sandbox that removes HTTP_PROXY means it.
+    policy.env.apply_to_command(&mut cmd);
+
     let start = std::time::Instant::now();
     let mut child = cmd.spawn().context("failed to spawn sandbox-exec")?;
     let child_pid = child.id();
@@ -732,12 +736,19 @@ fn exec_with_proxy(
                     anyhow::bail!("fork failed: {}", std::io::Error::last_os_error());
                 }
                 0 => {
-                    // Child: set proxy env vars, then apply sandbox + exec.
+                    // Child: set proxy env vars, apply the policy's own env
+                    // (last, so it wins), then apply sandbox + exec.
                     unsafe {
                         set_env_cstr("HTTP_PROXY", &proxy_url);
                         set_env_cstr("HTTPS_PROXY", &proxy_url);
                         set_env_cstr("http_proxy", &proxy_url);
                         set_env_cstr("https_proxy", &proxy_url);
+                        for (key, value) in &policy.env.set {
+                            set_env_cstr(key, value);
+                        }
+                        for key in &policy.env.remove {
+                            unset_env_cstr(key);
+                        }
                     }
                     match sandbox::exec_sandboxed(policy, cwd, command, None) {
                         Err(e) => {
@@ -780,6 +791,19 @@ unsafe fn set_env_cstr(key: &str, val: &str) {
     use std::ffi::CString;
     if let (Ok(k), Ok(v)) = (CString::new(key), CString::new(val)) {
         unsafe { libc::setenv(k.as_ptr(), v.as_ptr(), 1) };
+    }
+}
+
+/// Unset an environment variable using libc (safe to call after fork).
+///
+/// # Safety
+/// Same constraints as `set_env_cstr`: only call in the forked child before
+/// exec, where this process is single-threaded.
+#[cfg(not(target_os = "macos"))]
+unsafe fn unset_env_cstr(key: &str) {
+    use std::ffi::CString;
+    if let Ok(k) = CString::new(key) {
+        unsafe { libc::unsetenv(k.as_ptr()) };
     }
 }
 

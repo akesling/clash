@@ -404,6 +404,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // Path outside /project -> likely violation
@@ -428,6 +429,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // Path inside /project with full caps -> not a violation
@@ -445,6 +447,7 @@ mod tests {
             rules: vec![],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // Default grants write+create -> not a violation even for foreign paths
@@ -542,6 +545,7 @@ mod tests {
             rules: vec![],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let violations = vec![
@@ -567,6 +571,7 @@ mod tests {
             rules: vec![],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let violations = vec![
@@ -638,6 +643,7 @@ mod tests {
             rules: vec![],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let violations = vec![crate::audit::SandboxViolation {
@@ -661,6 +667,7 @@ mod tests {
             rules: vec![],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let violations = vec![crate::audit::SandboxViolation {

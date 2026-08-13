@@ -62,6 +62,21 @@ impl SandboxReport {
                     ));
                 }
 
+                if !sandbox.env.is_empty() {
+                    let mut parts: Vec<String> = sandbox
+                        .env
+                        .set
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect();
+                    parts.extend(sandbox.env.remove.iter().map(|k| format!("-{k}")));
+                    lines.push(format!(
+                        "  {}:        {}",
+                        style::cyan("env"),
+                        parts.join(" "),
+                    ));
+                }
+
                 if !sandbox.rules.is_empty() {
                     lines.push(String::new());
                     lines.push(format!("  {}:", style::cyan("rules")));
@@ -342,6 +357,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
 

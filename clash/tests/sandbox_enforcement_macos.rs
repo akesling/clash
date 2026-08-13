@@ -18,6 +18,7 @@ fn policy(network: NetworkPolicy, system: SystemCap) -> SandboxPolicy {
         rules: vec![],
         network,
         system,
+        env: Default::default(),
         doc: None,
     }
 }

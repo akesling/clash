@@ -257,20 +257,30 @@ fn make_sandbox_hook(
 
         let mut new_args = vec!["-p".to_string(), profile, "--".to_string()];
 
-        // Advertise the domain-filtering proxy only to commands whose own
-        // sandbox has exactly the network policy that proxy was built for.
-        // Exporting it into the shell environment instead would let any
-        // command able to reach loopback borrow this proxy — and with it, a
-        // different sandbox's domain allowlist.
+        // The shell hands `sandbox-exec` back to the shell engine to spawn, so
+        // we cannot set env on a Command here; anything environmental has to be
+        // interposed as `/usr/bin/env`. Build one combined set so the command
+        // line stays a single `env` invocation.
+        //
+        // Proxy plumbing is advertised only to commands whose own sandbox has
+        // exactly the network policy the proxy was built for — otherwise a
+        // loopback-capable sandbox sharing this shell could borrow a different
+        // sandbox's domain allowlist. It is a hint, not a boundary: the kernel
+        // profile is what actually confines the command.
+        let mut env_policy = resolved.env.clone();
         if let Some((addr, ref proxy_net)) = proxy
             && resolved.network == *proxy_net
         {
             let url = format!("http://{}", addr);
-            new_args.push("/usr/bin/env".to_string());
             for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
-                new_args.push(format!("{key}={url}"));
+                // Policy-declared values win: a sandbox that pins or removes a
+                // proxy variable overrides the plumbing.
+                if !env_policy.set.contains_key(key) && !env_policy.remove.contains(key) {
+                    env_policy.set.insert(key.to_string(), url.clone());
+                }
             }
         }
+        new_args.extend(env_policy.to_env_args());
 
         new_args.push(executable_path.to_string());
         new_args.extend(args.iter().cloned());

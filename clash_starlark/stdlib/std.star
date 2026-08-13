@@ -525,6 +525,74 @@ def localhost(ports=None, doc=None):
 # ---------------------------------------------------------------------------
 
 
+def _validate_env(env):
+    """Split sandbox env= into (default_mode, inherit, set_dict, remove).
+
+    Keys are variable names, or default() for the fallback:
+
+        env = {
+            default(): deny(),           # start from an empty environment
+            "PATH": allow(),             # pass through from the parent
+            "CARGO_HOME": "$HOME/.sbx",  # define (may reference $NAME)
+            "AWS_SECRET": deny(),        # withhold
+        }
+
+    The fallback is inherit, so adding an env block never silently strips
+    something. Under inherit, allow() on a name would be a no-op, so it is
+    rejected rather than quietly ignored.
+    """
+    if env == None:
+        return ("inherit", (), {}, ())
+    if type(env) != "dict":
+        fail("sandbox env= must be a dict of NAME -> \"value\" / allow() / deny(); got " + type(env))
+
+    mode = "inherit"
+    inherit = []
+    set_map = {}
+    remove = []
+
+    for name, action in env.items():
+        # default(): the fallback for names not mentioned.
+        if type(name) == "struct" and hasattr(name, "_match_key") and name._match_key == "default":
+            effect = _unwrap_effect(action)
+            if effect == "deny":
+                mode = "clean"
+            elif effect == "allow":
+                mode = "inherit"
+            else:
+                fail("sandbox env= default() must be allow() or deny(); got " + effect)
+            continue
+
+        if type(name) != "string":
+            fail("sandbox env= keys must be variable names or default(); got " + type(name))
+        if name == "":
+            fail("sandbox env= names must not be empty")
+        if "=" in name:
+            fail("sandbox env= name must not contain '=': " + name)
+
+        if type(action) == "string":
+            set_map[name] = action
+        elif hasattr(action, "_is_effect"):
+            effect = _unwrap_effect(action)
+            if effect == "deny":
+                remove.append(name)
+            elif effect == "allow":
+                inherit.append(name)
+            else:
+                fail("sandbox env= only supports a string value, allow() or deny(); got " + effect + " for " + name)
+        else:
+            fail("sandbox env= values must be a string, allow() or deny(); got " + type(action) + " for " + name)
+
+    if mode == "inherit" and len(inherit) > 0:
+        fail(
+            "sandbox env=: allow() passes a name through from an otherwise empty " +
+            "environment, so it only means something alongside 'default(): deny()'. " +
+            "Under the inherit default these names are already present: " + ", ".join(inherit),
+        )
+
+    return (mode, tuple(inherit), set_map, tuple(remove))
+
+
 _SYSTEM_CAPS = ("power", "localhost_serve")
 
 
@@ -542,10 +610,12 @@ def _validate_system(system):
     return tuple(system)
 
 
-def _make_sandbox(name, default, fs_rules, net_policy, net_domain_names=None, doc=None, system=()):
+def _make_sandbox(name, default, fs_rules, net_policy, net_domain_names=None, doc=None, system=(), env_default="inherit", env_inherit=(), env_set=None, env_remove=()):
     """Create a sandbox struct."""
     if net_domain_names == None:
         net_domain_names = []
+    if env_set == None:
+        env_set = {}
 
     def _update(other):
         updated_default = default if other._default == None else other._default
@@ -556,6 +626,16 @@ def _make_sandbox(name, default, fs_rules, net_policy, net_domain_names=None, do
         for s in (other._system if hasattr(other, "_system") else ()):
             if s not in merged_system:
                 merged_system.append(s)
+        merged_env_set = dict(env_set)
+        merged_env_set.update(other._env_set if hasattr(other, "_env_set") else {})
+        merged_env_remove = list(env_remove)
+        for e in (other._env_remove if hasattr(other, "_env_remove") else ()):
+            if e not in merged_env_remove:
+                merged_env_remove.append(e)
+        merged_env_inherit = list(env_inherit)
+        for e in (other._env_inherit if hasattr(other, "_env_inherit") else ()):
+            if e not in merged_env_inherit:
+                merged_env_inherit.append(e)
         return _make_sandbox(
             name,
             updated_default,
@@ -564,6 +644,10 @@ def _make_sandbox(name, default, fs_rules, net_policy, net_domain_names=None, do
             updated_domains,
             doc=doc,
             system=tuple(merged_system),
+            env_default=("clean" if env_default == "clean" or (other._env_default if hasattr(other, "_env_default") else "inherit") == "clean" else "inherit"),
+            env_inherit=tuple(merged_env_inherit),
+            env_set=merged_env_set,
+            env_remove=tuple(merged_env_remove),
         )
 
     return struct(
@@ -573,13 +657,17 @@ def _make_sandbox(name, default, fs_rules, net_policy, net_domain_names=None, do
         _net_policy=net_policy,
         _net_domain_names=net_domain_names,
         _system=system,
+        _env_default=env_default,
+        _env_inherit=env_inherit,
+        _env_set=env_set,
+        _env_remove=env_remove,
         _is_sandbox=True,
         _doc=doc,
         update=_update,
     )
 
 
-def sandbox(name=None, tree=None, default="deny", fs=None, net=None, doc=None, system=None):
+def sandbox(name=None, tree=None, default="deny", fs=None, net=None, doc=None, system=None, env=None):
     """Register a sandbox from a decision-tree dict, or (legacy) build one.
 
     New form:
@@ -597,16 +685,27 @@ def sandbox(name=None, tree=None, default="deny", fs=None, net=None, doc=None, s
         "localhost_serve" bind + accept connections on loopback ports
     """
     system = _validate_system(system)
+    env_default, env_inherit, env_set, env_remove = _validate_env(env)
     # New tree form: positional dict tree, no fs=/net= kwargs.
     if tree != None and type(tree) == "dict" and fs == None and net == None:
         if type(name) != "string":
             fail("sandbox() name must be a string")
-        _sandbox_impl(name, tree, default=_unwrap_effect(default), doc=doc, system=list(system))
+        _sandbox_impl(
+            name,
+            tree,
+            default=_unwrap_effect(default),
+            doc=doc,
+            system=list(system),
+            env_default=env_default,
+            env_inherit=list(env_inherit),
+            env_set=env_set,
+            env_remove=list(env_remove),
+        )
         return name
-    return _legacy_sandbox(name, default, fs, net, doc, system)
+    return _legacy_sandbox(name, default, fs, net, doc, system, env_default, env_inherit, env_set, env_remove)
 
 
-def _legacy_sandbox(name=None, default="deny", fs=None, net=None, doc=None, system=()):
+def _legacy_sandbox(name=None, default="deny", fs=None, net=None, doc=None, system=(), env_default="inherit", env_inherit=(), env_set=None, env_remove=()):
     """Legacy builder-based sandbox(). Removed in Task A6.
 
     Usage:
@@ -684,7 +783,7 @@ def _legacy_sandbox(name=None, default="deny", fs=None, net=None, doc=None, syst
         else:
             fail("sandbox net= must be an effect string or a list of domain entries")
 
-    return _make_sandbox(name, default, fs_rules, net_policy, net_domain_names, doc=doc, system=system)
+    return _make_sandbox(name, default, fs_rules, net_policy, net_domain_names, doc=doc, system=system, env_default=env_default, env_inherit=env_inherit, env_set=env_set, env_remove=env_remove)
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,7 @@ pub fn create_sandbox(
             rules: vec![],
             network,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc,
         },
     );

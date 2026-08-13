@@ -438,6 +438,7 @@ mod tests {
             rules: vec![],
             network: NetworkPolicy::Localhost,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let profile = compile_to_sbpl(&policy, "/tmp");
@@ -459,6 +460,7 @@ mod tests {
             rules: vec![],
             network,
             system,
+            env: Default::default(),
             doc: None,
         }
     }
@@ -590,6 +592,7 @@ mod tests {
             ],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let profile = compile_to_sbpl(&policy, "/tmp");
@@ -634,6 +637,7 @@ mod tests {
             ],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let profile = compile_to_sbpl(&policy, "/tmp");
@@ -682,6 +686,7 @@ mod tests {
             ],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let profile = compile_to_sbpl(&policy, "/tmp");
@@ -713,6 +718,7 @@ mod tests {
             rules: vec![],
             network: NetworkPolicy::Localhost,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let domains_policy = SandboxPolicy {
@@ -720,6 +726,7 @@ mod tests {
             rules: vec![],
             network: NetworkPolicy::AllowDomains(vec!["example.com".into()]),
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let localhost_profile = compile_to_sbpl(&localhost_policy, "/tmp");
@@ -735,6 +742,7 @@ mod tests {
             rules: vec![],
             network: NetworkPolicy::LocalhostPorts(vec![8080, 3000]),
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let profile = compile_to_sbpl(&policy, "/tmp");

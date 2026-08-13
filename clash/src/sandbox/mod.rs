@@ -235,6 +235,8 @@ pub fn spawn_sandboxed_shell(
         if let Some(ref handle) = _proxy_handle {
             set_proxy_env(&mut cmd, handle.addr);
         }
+        // Policy-declared env last, so it wins over the proxy plumbing.
+        policy.env.apply_to_command(&mut cmd);
 
         let status = cmd.status().map_err(SandboxError::Exec)?;
         Ok(status)
@@ -357,6 +359,7 @@ mod tests {
             ],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         }
     }
@@ -407,6 +410,7 @@ mod tests {
             rules: vec![],
             network: NetworkPolicy::Allow,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let caps = policy.effective_caps("/any/path", "/cwd");
@@ -427,6 +431,7 @@ mod tests {
             }],
             network: NetworkPolicy::Allow,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let caps = policy.effective_caps("/tmp/file.txt", "/cwd");
@@ -447,6 +452,7 @@ mod tests {
             }],
             network: NetworkPolicy::Allow,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let caps = policy.effective_caps("/etc/passwd", "/cwd");
@@ -481,6 +487,7 @@ mod tests {
             ],
             network: NetworkPolicy::Allow,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // /data/file.txt: default READ + allow WRITE = READ | WRITE
@@ -509,6 +516,7 @@ mod tests {
             }],
             network: NetworkPolicy::Allow,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // Exact match → denied
@@ -531,6 +539,7 @@ mod tests {
             }],
             network: NetworkPolicy::Allow,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // Path outside /tmp → only default caps

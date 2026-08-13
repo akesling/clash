@@ -359,6 +359,7 @@ mod tests {
             rules: vec![],
             network,
             system,
+            env: Default::default(),
             doc: None,
         }
     }

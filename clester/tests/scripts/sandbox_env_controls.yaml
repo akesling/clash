@@ -1,0 +1,111 @@
+meta:
+  name: sandbox env controls
+  description: >
+    `env=` on a sandbox definition manipulates the environment the sandboxed
+    process runs in. Removal is confinement — the value never reaches the
+    child. Assignment is configuration. Both are asserted against a real
+    process, because a declaration that never reaches the child is worthless.
+
+    Two traps this script is written to avoid:
+
+    - A shell builtin such as `echo` runs inside the shell process, which is
+      never sandboxed, so it reports the shell's environment. Every step here
+      invokes an external binary.
+    - `--sandbox` only sets the shell's *fallback*; a matching policy rule wins
+      per command. The managed and unmanaged cases are therefore routed by
+      binary (`printenv` vs `env`), not by the CLI flag.
+    - Rules match the command *basename*, so keying a rule on an absolute path
+      silently never fires.
+
+clash:
+  policy_star: |
+    load("@clash//std.star", "allow", "deny", "ask", "sandbox", "policy", "settings", "tool", "glob")
+
+    configured = sandbox(
+        name = "configured",
+        default = ask(),
+        fs = {"$PWD": allow("rwc")},
+        env = {
+            "CLASH_TEST_MARKER": "applied",
+            "HOME": deny(),
+        },
+    )
+
+    plain = sandbox(
+        name = "plain",
+        default = ask(),
+        fs = {"$PWD": allow("rwc")},
+    )
+
+    # Fail-closed variant: nothing survives except what is named.
+    hermetic = sandbox(
+        name = "hermetic",
+        default = ask(),
+        fs = {"$PWD": allow("rwc")},
+        env = {
+            default(): deny(),
+            "PATH": allow(),
+            "RELOCATED": "$HOME/.sbx/cargo",
+        },
+    )
+
+    settings(default = deny())
+    policy("test", {
+        tool("Bash"): {
+            # Matched on the basename: the hook evaluates the resolved command name,
+            # not the absolute path typed at the prompt.
+            "printenv": {glob("**"): allow(sandbox = configured)},
+            "sh": {glob("**"): allow(sandbox = hermetic)},
+            glob("**"): allow(sandbox = plain),
+        },
+    })
+
+steps:
+  - name: an assigned variable reaches the sandboxed process
+    command: shell -c '/usr/bin/printenv CLASH_TEST_MARKER'
+    expect:
+      exit_code: 0
+      stdout_contains: "applied"
+
+  # Control: a sandbox with no env policy inherits HOME, so the removal
+  # assertion below cannot pass for the wrong reason.
+  - name: a sandbox that does not manage HOME inherits it
+    command: shell -c '/usr/bin/env'
+    expect:
+      exit_code: 0
+      stdout_contains: "HOME="
+
+  - name: a removed variable is withheld from the sandboxed process
+    command: shell -c '/usr/bin/printenv HOME || echo HOME_ABSENT'
+    expect:
+      stdout_contains: "HOME_ABSENT"
+
+  - name: an unmanaged variable is still inherited by the configured sandbox
+    command: shell -c '/usr/bin/printenv PATH'
+    expect:
+      exit_code: 0
+      stdout_contains: "/usr/bin"
+
+  # Clean mode: the point is that a name nobody listed is gone. HOME is used as
+  # the stand-in for an unanticipated credential — the control step above proves
+  # it is present in the parent, so its absence here is meaningful.
+  - name: a clean environment drops variables nobody listed
+    command: shell -c '/bin/sh -c "printenv HOME || echo UNLISTED_ABSENT"'
+    expect:
+      stdout_contains: "UNLISTED_ABSENT"
+
+  - name: a clean environment keeps what was explicitly passed through
+    command: shell -c '/bin/sh -c "printenv PATH"'
+    expect:
+      exit_code: 0
+      stdout_contains: "/usr/bin"
+
+  - name: assigned values expand $NAME from the parent environment
+    command: shell -c '/bin/sh -c "printenv RELOCATED"'
+    expect:
+      exit_code: 0
+      # Must contain the parent's HOME, not just the literal suffix: an
+      # expansion to empty would still end in "/.sbx/cargo" and pass.
+      stdout_contains: "home/.sbx/cargo"
+      not:
+        stdout_contains: "$HOME"

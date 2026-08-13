@@ -394,6 +394,48 @@ Sandboxes that don't pass `system=` are unaffected.
 
 **Platform differences**: on macOS, Seatbelt enforces both the loopback restriction and the port list at the kernel level. On Linux, seccomp cannot dereference the `sockaddr` argument, so the same limitation that makes `Localhost` advisory applies here: a sandbox granted `localhost_serve` can bind `0.0.0.0` and any port, exposing the listener beyond loopback. Treat `localhost_serve` as macOS-strict and Linux-advisory when writing portable policies.
 
+### Environment controls
+
+`env=` manipulates the environment a sandboxed process runs in. Keys are variable names, or `default()` for the fallback:
+
+```python
+build_env = sandbox(
+    name = "build",
+    default = deny(),
+    fs = {"$PWD": allow("rwcd")},
+    env = {
+        default(): deny(),                    # start from an empty environment
+        "PATH": allow(),                      # pass through from the parent
+        "HOME": allow(),
+        "CARGO_HOME": "$HOME/.sandboxed/cargo",  # define (see templating below)
+    },
+)
+```
+
+**Choose the fallback deliberately — the two modes fail in opposite directions.**
+
+- `default(): deny()` starts from an empty environment; only names you `allow()` or assign are present. It **fails closed**: a credential nobody anticipated is absent.
+- The default fallback, `inherit`, keeps the parent environment and applies edits on top. Withholding names with `deny()` **fails open**: it only removes what somebody thought to list, and the next tool to invent `SOME_NEW_TOKEN` leaks. Use it for tidying, not for keeping secrets away from a process.
+
+`allow()` only means something once the environment has been cleared, so using it without `default(): deny()` is rejected rather than silently ignored.
+
+Removal is applied after assignment, so a name in both is withheld. Unmanaged names are inherited under the default fallback; `env=` is a targeted edit unless you clear it.
+
+**Templating.** Assigned values may reference the *parent's* environment with `$NAME` or `${NAME}`, so a sandbox can relocate tool state without hard-coding a path:
+
+```python
+"CARGO_HOME": "$HOME/.sandboxed/cargo",
+"TMPDIR": "$PWD/.tmp",
+```
+
+`$PWD`, `$HOME` and `$TMPDIR` work because they are ordinary environment variables — there is no separate placeholder vocabulary. An undefined name expands to empty, matching how `$VAR` resolves elsewhere in clash, so check the name if a path comes out with a missing segment. Write `$$` for a literal `$`. Under `default(): deny()` expansion still reads the parent environment, before it is discarded.
+
+**Assignment is configuration, not enforcement.** It shapes how a cooperating program behaves and restricts nothing. Only clearing and withholding are confinement.
+
+**Do not put secrets in assigned or passed-through values.** On the shell path clash cannot set environment variables on a `Command` it does not spawn, so they are passed via `/usr/bin/env`, which makes them visible in `ps` output. Withholding has no such exposure.
+
+Policy-declared entries are applied last, so they override clash's own plumbing — a sandbox that pins or withholds `HTTP_PROXY` overrides the domain-filtering proxy address that would otherwise be advertised to it.
+
 ### Signalling
 
 All sandboxed processes may signal other processes **within the same sandbox instance** — a build client health-checking its own server, a shell killing a backgrounded child. Signalling anything outside the sandbox is denied, including processes running under an identical profile in a *different* sandbox instance.

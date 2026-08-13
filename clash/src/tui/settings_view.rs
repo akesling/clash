@@ -218,6 +218,7 @@ mod tests {
                 rules: vec![],
                 network: crate::policy::sandbox_types::NetworkPolicy::Deny,
                 system: SystemCap::empty(),
+                env: Default::default(),
                 doc: None,
             },
         );
@@ -228,6 +229,7 @@ mod tests {
                 rules: vec![],
                 network: crate::policy::sandbox_types::NetworkPolicy::Deny,
                 system: SystemCap::empty(),
+                env: Default::default(),
                 doc: None,
             },
         );

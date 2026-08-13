@@ -239,6 +239,208 @@ impl<'de> Deserialize<'de> for SystemCap {
     }
 }
 
+/// Whether a sandboxed process starts from the parent environment or an empty
+/// one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EnvDefault {
+    /// Inherit the parent environment, then apply edits. The default, so
+    /// adding an `env` block never silently strips something.
+    #[default]
+    Inherit,
+    /// Start from an empty environment; only explicitly inherited or assigned
+    /// names are present. Fails closed: a credential nobody thought to name is
+    /// absent rather than passed through.
+    Clean,
+}
+
+impl EnvDefault {
+    fn is_inherit(&self) -> bool {
+        matches!(self, EnvDefault::Inherit)
+    }
+}
+
+/// Environment manipulation applied to a sandboxed process.
+///
+/// The operations are not equally strong, and it matters which one a policy
+/// leans on:
+///
+/// - `default: Clean` plus `inherit` is confinement, and it fails closed —
+///   anything not named is absent.
+/// - `remove` is confinement, but it fails *open*: it only withholds names
+///   somebody thought to list. Prefer `Clean` when the goal is keeping
+///   credentials away from a process.
+/// - `set` is configuration, not enforcement. It shapes how a cooperating
+///   program behaves and constrains nothing.
+///
+/// Removal is applied after assignment, so a name in both is withheld.
+///
+/// Assigned values may reference the *parent's* environment with `$NAME` or
+/// `${NAME}`, so a sandbox can relocate tool state without hard-coding a path:
+/// `"CARGO_HOME": "$HOME/.sandboxed/cargo"`. `$PWD`, `$HOME` and `$TMPDIR`
+/// work because they are ordinary environment variables — there is no separate
+/// placeholder vocabulary. An undefined name expands to empty, matching how
+/// clash resolves `$VAR` elsewhere. Write `$$` for a literal `$`. Under
+/// `Clean`, expansion still reads the parent environment, before it is
+/// discarded.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvPolicy {
+    /// Whether to start from the parent environment or an empty one.
+    #[serde(default, skip_serializing_if = "EnvDefault::is_inherit")]
+    pub default: EnvDefault,
+
+    /// Names passed through from the parent. Only meaningful under `Clean`;
+    /// under `Inherit` everything is already passed through.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub inherit: std::collections::BTreeSet<String>,
+
+    /// Variables to define for the sandboxed process.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub set: std::collections::BTreeMap<String, String>,
+
+    /// Variables to withhold from the sandboxed process.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub remove: std::collections::BTreeSet<String>,
+}
+
+impl EnvPolicy {
+    /// Whether this policy would change anything.
+    pub fn is_empty(&self) -> bool {
+        self.default.is_inherit()
+            && self.inherit.is_empty()
+            && self.set.is_empty()
+            && self.remove.is_empty()
+    }
+
+    /// Whether the parent environment is discarded before edits are applied.
+    pub fn is_clean(&self) -> bool {
+        matches!(self.default, EnvDefault::Clean)
+    }
+
+    /// The variables a `Clean` policy carries over, read from `parent`.
+    ///
+    /// Names absent from the parent are skipped rather than defined empty, so
+    /// a pass-through never invents a value.
+    fn inherited_from<'a>(
+        &'a self,
+        parent: &'a std::collections::HashMap<String, String>,
+    ) -> impl Iterator<Item = (&'a String, &'a String)> + 'a {
+        self.inherit
+            .iter()
+            .filter_map(move |name| parent.get_key_value(name))
+    }
+
+    /// Expand `$NAME` / `${NAME}` against `parent`; `$$` is a literal `$`.
+    ///
+    /// An undefined name expands to empty, consistent with how `$VAR` resolves
+    /// elsewhere in clash.
+    pub fn expand(raw: &str, parent: &std::collections::HashMap<String, String>) -> String {
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '$' {
+                out.push(c);
+                continue;
+            }
+            match chars.peek() {
+                Some('$') => {
+                    chars.next();
+                    out.push('$');
+                }
+                Some('{') => {
+                    chars.next();
+                    let mut name = String::new();
+                    let mut closed = false;
+                    for c in chars.by_ref() {
+                        if c == '}' {
+                            closed = true;
+                            break;
+                        }
+                        name.push(c);
+                    }
+                    if closed {
+                        out.push_str(parent.get(&name).map(String::as_str).unwrap_or(""));
+                    } else {
+                        // Unterminated: emit verbatim rather than silently
+                        // swallowing the rest of the value.
+                        out.push_str("${");
+                        out.push_str(&name);
+                    }
+                }
+                Some(c0) if c0.is_ascii_alphabetic() || *c0 == '_' => {
+                    let mut name = String::new();
+                    while let Some(c) = chars.peek() {
+                        if c.is_ascii_alphanumeric() || *c == '_' {
+                            name.push(*c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    out.push_str(parent.get(&name).map(String::as_str).unwrap_or(""));
+                }
+                // A `$` not starting a name is literal.
+                _ => out.push('$'),
+            }
+        }
+        out
+    }
+
+    /// Apply to a `Command` the caller is about to spawn.
+    pub fn apply_to_command(&self, cmd: &mut std::process::Command) {
+        let parent: std::collections::HashMap<String, String> = std::env::vars().collect();
+        if self.is_clean() {
+            cmd.env_clear();
+            for (name, value) in self.inherited_from(&parent) {
+                cmd.env(name, value);
+            }
+        }
+        for (key, value) in &self.set {
+            cmd.env(key, Self::expand(value, &parent));
+        }
+        for key in &self.remove {
+            cmd.env_remove(key);
+        }
+    }
+
+    /// Render as `/usr/bin/env` arguments, for callers that hand the command
+    /// to something else to spawn and so cannot set env directly.
+    ///
+    /// Empty when nothing would change, so callers can skip interposing `env`.
+    ///
+    /// Under `Clean` the pass-through values have to be materialised here, so
+    /// they land in argv alongside assignments — see the policy guide's note
+    /// about `ps` visibility. Pass through configuration, not secrets.
+    pub fn to_env_args(&self) -> Vec<String> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let parent: std::collections::HashMap<String, String> = std::env::vars().collect();
+        let mut args = vec!["/usr/bin/env".to_string()];
+        if self.is_clean() {
+            args.push("-i".to_string());
+            for (name, value) in self.inherited_from(&parent) {
+                if !self.remove.contains(name) && !self.set.contains_key(name) {
+                    args.push(format!("{name}={value}"));
+                }
+            }
+        } else {
+            for key in &self.remove {
+                args.push("-u".to_string());
+                args.push(key.clone());
+            }
+        }
+        for (key, value) in &self.set {
+            // `remove` wins, so skip a name that is also being withheld.
+            if self.remove.contains(key) {
+                continue;
+            }
+            args.push(format!("{key}={}", Self::expand(value, &parent)));
+        }
+        args
+    }
+}
+
 /// A sandbox policy is a list of capability rules applied to paths,
 /// plus a network policy. Platform backends compile this to their
 /// native enforcement (Landlock+seccomp, Seatbelt SBPL, etc.).
@@ -263,6 +465,10 @@ pub struct SandboxPolicy {
         skip_serializing_if = "SystemCap::is_empty"
     )]
     pub system: SystemCap,
+
+    /// Environment manipulation applied to the sandboxed process.
+    #[serde(default, skip_serializing_if = "EnvPolicy::is_empty")]
+    pub env: EnvPolicy,
 
     /// Optional docstring describing this sandbox's purpose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -777,6 +983,7 @@ mod tests {
             ],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
 
@@ -838,6 +1045,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
 
@@ -846,6 +1054,118 @@ mod tests {
         assert_eq!(deserialized.default, policy.default);
         assert_eq!(deserialized.rules.len(), 1);
         assert_eq!(deserialized.network, NetworkPolicy::Deny);
+    }
+
+    fn parent_env(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn expand_substitutes_from_the_parent() {
+        let p = parent_env(&[("HOME", "/home/alice"), ("X", "1")]);
+        assert_eq!(EnvPolicy::expand("$HOME/.cargo", &p), "/home/alice/.cargo");
+        assert_eq!(EnvPolicy::expand("${HOME}x", &p), "/home/alicex");
+        assert_eq!(EnvPolicy::expand("a${X}b$X", &p), "a1b1");
+    }
+
+    #[test]
+    fn expand_undefined_name_is_empty() {
+        // Matches how `$VAR` resolves elsewhere in clash.
+        let p = parent_env(&[]);
+        assert_eq!(EnvPolicy::expand("/pre/$NOPE/post", &p), "/pre//post");
+    }
+
+    #[test]
+    fn expand_escapes_and_literals() {
+        let p = parent_env(&[("X", "1")]);
+        assert_eq!(EnvPolicy::expand("$$X", &p), "$X");
+        assert_eq!(EnvPolicy::expand("cost: 5$", &p), "cost: 5$");
+        assert_eq!(EnvPolicy::expand("$ X", &p), "$ X");
+        // Unterminated braces are emitted verbatim, not swallowed.
+        assert_eq!(EnvPolicy::expand("${UNCLOSED", &p), "${UNCLOSED");
+    }
+
+    #[test]
+    fn clean_mode_emits_env_dash_i_and_only_named_passthrough() {
+        let mut env = EnvPolicy {
+            default: EnvDefault::Clean,
+            ..Default::default()
+        };
+        env.inherit.insert("PATH".into());
+        env.set.insert("MARK".into(), "1".into());
+        let args = env.to_env_args();
+        assert_eq!(args[0], "/usr/bin/env");
+        assert_eq!(args[1], "-i");
+        assert!(args.contains(&"MARK=1".to_string()));
+        // PATH is materialised from the real parent env, so just check shape.
+        assert!(args.iter().any(|a| a.starts_with("PATH=")));
+        // Nothing else leaks in.
+        assert!(!args.iter().any(|a| a.starts_with("HOME=")));
+    }
+
+    #[test]
+    fn clean_mode_is_not_empty_even_with_no_edits() {
+        let env = EnvPolicy {
+            default: EnvDefault::Clean,
+            ..Default::default()
+        };
+        assert!(!env.is_empty(), "a clean environment is itself a change");
+        assert_eq!(env.to_env_args(), vec!["/usr/bin/env", "-i"]);
+    }
+
+    #[test]
+    fn env_policy_empty_by_default_and_omitted() {
+        let json = r#"{"default":["read"],"rules":[],"network":"deny"}"#;
+        let p: SandboxPolicy = serde_json::from_str(json).unwrap();
+        assert!(p.env.is_empty());
+        assert!(!serde_json::to_string(&p).unwrap().contains("env"));
+    }
+
+    #[test]
+    fn env_policy_roundtrips() {
+        let json = r#"{"default":["read"],"rules":[],"network":"deny",
+                       "env":{"set":{"CARGO_HOME":"/tmp/ch"},"remove":["AWS_SECRET_ACCESS_KEY"]}}"#;
+        let p: SandboxPolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(p.env.set.get("CARGO_HOME").unwrap(), "/tmp/ch");
+        assert!(p.env.remove.contains("AWS_SECRET_ACCESS_KEY"));
+        let out = serde_json::to_string(&p).unwrap();
+        assert!(out.contains("CARGO_HOME"));
+        assert!(out.contains("AWS_SECRET_ACCESS_KEY"));
+    }
+
+    #[test]
+    fn env_args_are_empty_when_nothing_changes() {
+        assert!(EnvPolicy::default().to_env_args().is_empty());
+    }
+
+    #[test]
+    fn env_args_unset_then_assign() {
+        let mut env = EnvPolicy::default();
+        env.set.insert("A".into(), "1".into());
+        env.remove.insert("B".into());
+        let args = env.to_env_args();
+        assert_eq!(args[0], "/usr/bin/env");
+        assert!(args.contains(&"-u".to_string()));
+        assert!(args.contains(&"B".to_string()));
+        assert!(args.contains(&"A=1".to_string()));
+    }
+
+    #[test]
+    fn removal_wins_over_assignment_for_the_same_name() {
+        // Documented precedence: a name in both is withheld, and must not be
+        // re-introduced by the assignment half of the same policy.
+        let mut env = EnvPolicy::default();
+        env.set.insert("TOKEN".into(), "secret".into());
+        env.remove.insert("TOKEN".into());
+        let args = env.to_env_args();
+        assert!(
+            !args.iter().any(|a| a.starts_with("TOKEN=")),
+            "removed name must not be assigned: {args:?}"
+        );
+        assert!(args.contains(&"TOKEN".to_string()));
     }
 
     #[test]
@@ -994,6 +1314,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let caps = policy.effective_caps("/project/src/main.rs", "/project");
@@ -1018,6 +1339,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // Exact match
@@ -1053,6 +1375,7 @@ mod tests {
             ],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // At same depth, allow wins (last-match-wins, matching SBPL semantics)
@@ -1092,6 +1415,7 @@ mod tests {
             ],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // In /project but outside .git: full caps
@@ -1117,6 +1441,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // Path that matches no rules gets default
@@ -1165,6 +1490,7 @@ mod tests {
             ],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
 
@@ -1199,6 +1525,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // No follow_worktrees rules → policy unchanged regardless of cwd
@@ -1224,6 +1551,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // Normal repo (not a worktree) → no expansion
@@ -1273,6 +1601,7 @@ mod tests {
             ],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
 
@@ -1418,6 +1747,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // Query via the resolved (real) path should match the symlink rule
@@ -1449,6 +1779,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         // Query via the symlink should match the real-path rule
@@ -1480,6 +1811,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let query = format!("{}/file.txt", real_dir.display());
@@ -1510,6 +1842,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let query = format!("{}/secret", real_dir.display());
@@ -1536,6 +1869,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let caps = policy.effective_caps("/private/var/folders/xx/data", "/ignored");
@@ -1560,6 +1894,7 @@ mod tests {
             }],
             network: NetworkPolicy::Deny,
             system: SystemCap::empty(),
+            env: Default::default(),
             doc: None,
         };
         let caps = policy.effective_caps("/tmp/scratch", "/ignored");
